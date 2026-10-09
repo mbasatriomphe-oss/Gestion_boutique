@@ -24,6 +24,8 @@ import {
   TrendingUp,
   UserCheck,
   ArrowLeftRight,
+  Wallet,
+  UserRoundCog,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
@@ -42,16 +44,18 @@ const adminNavigation = [
   { name: "Vendeurs", href: "/admin/vendeurs", icon: UserCheck },
   { name: "Clients", href: "/admin/clients", icon: Users },
   { name: "Ventes", href: "/admin/ventes", icon: ShoppingCart },
+  { name: "Crédits clients", href: "/admin/credits", icon: Wallet },
   { name: "Retours", href: "/admin/retours", icon: ArrowLeftRight },
   { name: "Commandes", href: "/admin/orders", icon: ShoppingCart },
   { name: "Fournisseurs", href: "/admin/fournisseurs", icon: Truck },
   { name: "Approvisionnements", href: "/admin/approvisionnements", icon: PackagePlus },
   { name: "Lots", href: "/admin/lots", icon: Package },
-  { name: "Rapport Stock", href: "/admin/stock-reports", icon: FileSpreadsheet },
+  { name: "Stock", href: "/admin/stock-reports", icon: FileSpreadsheet },
   { name: "Tous les Rapports", href: "/admin/reports", icon: FileSpreadsheet },
   { name: "Organisations", href: "/admin/organizations", icon: Building2 },
   { name: "Analyses", href: "/admin/analytics", icon: BarChart3 },
   { name: "Paramètres", href: "/admin/settings", icon: Settings },
+  { name: "Mon compte", href: "/admin/mon-compte", icon: UserRoundCog },
 ]
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -72,6 +76,20 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       router.push("/access-denied")
     }
   }, [user, isLoading, isAdminUser, router])
+
+  useEffect(() => {
+    if (isLoading || !isAdminUser) return
+
+    const prefetchTimer = window.setTimeout(() => {
+      for (const item of adminNavigation) {
+        if (item.href !== pathname) {
+          router.prefetch(item.href)
+        }
+      }
+    }, 800)
+
+    return () => window.clearTimeout(prefetchTimer)
+  }, [isAdminUser, isLoading, pathname, router])
 
   // Show loading state
   if (isLoading) {
@@ -177,9 +195,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   )
 
   return (
-    <div className="flex h-screen flex-col bg-background lg:flex-row">
+    <div className="flex h-screen flex-col bg-background lg:flex-row print:block print:h-auto">
       {/* Desktop Sidebar */}
-      <div className="hidden lg:flex lg:flex-shrink-0">
+    <div className="hidden lg:flex lg:flex-shrink-0 print:hidden">
         <div className="flex w-64 flex-col border-r bg-card">
           <Sidebar />
         </div>
@@ -195,7 +213,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Mobile Header */}
-        <div className="flex h-16 items-center justify-between gap-3 border-b bg-card px-4 lg:hidden">
+        <div className="flex h-16 items-center justify-between gap-3 border-b bg-card px-4 lg:hidden print:hidden">
           <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
             <SheetTrigger asChild>
               <Button variant="ghost" size="icon">
@@ -220,7 +238,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </div>
 
         {/* Page Content */}
-        <main className="flex-1 overflow-auto bg-muted/30">
+        <main className="flex-1 overflow-auto bg-muted/30 print:overflow-visible">
           <div className="p-4 lg:p-8">{children}</div>
         </main>
       </div>

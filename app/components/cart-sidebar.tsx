@@ -1,18 +1,38 @@
 "use client"
 
 import { useRouter } from "next/navigation"
-import { Minus, Plus, ShoppingCart, Trash2, User, Tag } from "lucide-react"
+import { Minus, Package, Plus, ShoppingCart, Trash2, User, Tag } from "lucide-react"
 import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import formatMoney from "@/lib/formatMoney"
 import { useCart } from "../context/cart-context"
 import CustomerModal from "./customer-modal"
 import DiscountModal from "./discount-modal"
 
+function CartProductImage({ image, name }: { image?: string | null; name: string }) {
+  const [failed, setFailed] = useState(!image)
+
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-muted text-muted-foreground">
+      {failed ? (
+        <Package className="h-7 w-7" aria-label={`Aucune image pour ${name}`} />
+      ) : (
+        <img
+          src={image ?? ""}
+          alt={name}
+          className="h-full w-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </div>
+  )
+}
+
 export default function CartSidebar() {
   const router = useRouter()
-  const { cart, removeFromCart, updateQuantity, cartTotal, itemCount, customer, appliedDiscount, discountAmount } =
+  const { cart, removeFromCart, updateQuantity, updateSaleUnit, cartTotal, itemCount, customer, appliedDiscount, discountAmount } =
     useCart()
   const [showCustomerModal, setShowCustomerModal] = useState(false)
   const [showDiscountModal, setShowDiscountModal] = useState(false)
@@ -71,7 +91,7 @@ export default function CartSidebar() {
             {cart.map((item) => (
               <div key={item.id} className="flex gap-3 rounded-lg border p-2 sm:p-0 sm:border-0">
                 <div className="h-14 w-14 flex-shrink-0 overflow-hidden rounded-md border sm:h-16 sm:w-16">
-                  <img src={item.image || "/placeholder.svg"} alt={item.name} className="h-full w-full object-cover" />
+                <CartProductImage image={item.image} name={item.name} />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
                   <div className="flex gap-2 justify-between">
@@ -79,6 +99,20 @@ export default function CartSidebar() {
                     <p className="shrink-0 font-medium">{formatMoney(item.price * item.quantity, item.currencySymbol ?? currencySymbol)}</p>
                   </div>
                   <p className="text-xs text-muted-foreground sm:text-sm">{formatMoney(item.price, item.currencySymbol ?? currencySymbol)} chacun</p>
+                  {item.saleUnits && item.saleUnits.length > 1 && (
+                    <Select value={String(item.saleUnitId ?? "")} onValueChange={(value) => updateSaleUnit(item.id, Number(value))}>
+                      <SelectTrigger className="mt-2 h-8 text-xs" aria-label={`Unité de vente pour ${item.name}`}>
+                        <SelectValue placeholder="Unité de vente" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {item.saleUnits.map((unit) => (
+                          <SelectItem key={unit.id} value={String(unit.id)}>
+                            {unit.label} · {unit.factor} {item.stockUnitLabel ?? "unités de stock"}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <div className="flex items-center">
                       <Button
@@ -89,7 +123,7 @@ export default function CartSidebar() {
                       >
                         <Minus className="h-3 w-3" />
                       </Button>
-                      <span className="w-8 text-center text-sm">{item.quantity}</span>
+                      <span className="min-w-8 text-center text-sm">{item.quantity} {item.saleUnitLabel ?? ""}</span>
                       <Button
                         variant="outline"
                         size="icon"

@@ -26,7 +26,7 @@ import {
   UserPlus,
   Wallet,
 } from "lucide-react"
-import { backendRequest } from "@/app/services/backend"
+import { backendRequest, getBackendBaseUrl, getStoredToken } from "@/app/services/backend"
 import formatMoney from "@/lib/formatMoney"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -36,7 +36,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
-type TabKey = "overview" | "sales" | "stock" | "finance" | "clients" | "personnel"
+type TabKey = "overview" | "sales" | "stock" | "finance" | "clients" | "personnel" | "cashbook" | "products"
 
 interface BackendEnvelope<T> {
   status?: string
@@ -47,9 +47,12 @@ interface BackendEnvelope<T> {
 interface BackendLineSale {
   id?: number
   id_produit?: number | string
+  id_unite?: number | string
+  facteur_conversion?: number | string
   quantite?: number | string
   prix_vente?: number | string
   produit?: Record<string, any> | null
+  unite?: Record<string, any> | null
   devise?: Record<string, any> | null
 }
 
@@ -132,6 +135,8 @@ interface BackendApprovisionnement {
 
 interface BackendCashTransaction {
   id: number
+  id_caisse?: number
+  devise_code?: string | null
   type?: string | null
   montant?: number | string | null
   reference_type?: string | null
@@ -139,13 +144,17 @@ interface BackendCashTransaction {
   description?: string | null
   solde_avant?: number | string | null
   solde_apres?: number | string | null
+  date_mouvement?: string | null
   created_at?: string | null
+  utilisateur_nom?: string | null
+  utilisateur_prenom?: string | null
   caisse?: Record<string, any> | null
   creator?: Record<string, any> | null
 }
 
 interface BackendCaisse {
   id: number
+  id_devise?: number
   solde?: number | string | null
   devise?: Record<string, any> | null
 }
@@ -214,6 +223,14 @@ function getRelation(source: Record<string, any> | null | undefined, relationNam
 function formatDateInputValue(date: Date) {
   const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
   return localDate.toISOString().slice(0, 10)
+}
+
+function formatReportDate(value?: Date | null, withTime = false) {
+  return value ? format(value, withTime ? "dd/MM/yyyy HH:mm" : "dd/MM/yyyy") : "-"
+}
+
+function currencyLabelFor(currencyCode: string, currencies: Array<{ code?: string; symbole?: string }>) {
+  return currencies.find((currency) => currency.code === currencyCode)?.symbole || currencyCode || undefined
 }
 
 function parseDate(value?: string | null) {
@@ -406,21 +423,19 @@ export default function ShopReportsPage() {
   })
   const [selectedTab, setSelectedTab] = useState<TabKey>("overview")
   const [loading, setLoading] = useState(true)
+  const [exportingPdf, setExportingPdf] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [data, setData] = useState<ReportsState>(EMPTY_STATE)
   const [devises, setDevises] = useState<Array<{ id: number; code?: string; symbole?: string }>>([])
   const [selectedCurrency, setSelectedCurrency] = useState<string>("")
+  const [cashBookCurrency, setCashBookCurrency] = useState<string>("")
 
   useEffect(() => {
     let cancelled = false
 
     const fetchRows = async <T,>(path: string) => {
-      try {
-        const response = await backendRequest<BackendEnvelope<unknown>>(path)
-        return normalizeRows<T>(response)
-      } catch {
-        return [] as T[]
-      }
+      const response = await backendRequest<BackendEnvelope<unknown>>(path)
+      return normalizeRows<T>(response)
     }
 
     const loadReports = async () => {
@@ -446,6 +461,17 @@ export default function ShopReportsPage() {
           return
         }
 
+        const currencyByCaisseId = new Map(
+          caisses.map((caisse) => [
+            Number(caisse.id),
+            devises.find((currency: any) => Number(currency.id) === Number(caisse.id_devise))?.code ?? "",
+          ]),
+        )
+        const cashTransactionsWithCurrency = cashTransactions.map((transaction) => ({
+          ...transaction,
+          devise_code: transaction.devise_code || currencyByCaisseId.get(Number(transaction.id_caisse)) || "",
+        }))
+
         setData({
           sales,
           products,
@@ -455,10 +481,11 @@ export default function ShopReportsPage() {
           stocks,
           lots,
           approvisionnements,
-          cashTransactions,
+          cashTransactions: cashTransactionsWithCurrency,
           caisses,
         })
         setDevises((devises ?? []) as Array<{ id: number; code?: string; symbole?: string }>)
+        setCashBookCurrency((current) => current || cashTransactionsWithCurrency.find((transaction) => transaction.devise_code)?.devise_code || "")
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : "Impossible de charger les rapports")
@@ -564,7 +591,8 @@ export default function ShopReportsPage() {
         brand: string
         quantity: number
         revenue: number
-        transactions: number
+        sales: Set<number>
+        units: Map<string, { label: string; quantity: number }>
       }
     >()
 
@@ -578,13 +606,19 @@ export default function ShopReportsPage() {
           brand: getBrandLabel(product),
           quantity: 0,
           revenue: 0,
-          transactions: 0,
+          sales: new Set<number>(),
+          units: new Map<string, { label: string; quantity: number }>(),
         }
 
         existing.product = product
         existing.quantity += toNumber(line.quantite)
         existing.revenue += toNumber(line.quantite) * toNumber(line.prix_vente)
-        existing.transactions += 1
+        existing.sales.add(Number(sale.id))
+        const unitId = String(line.id_unite ?? line.unite?.id ?? "base")
+        const unitLabel = line.unite?.nom || line.unite?.symbole || getRelation(product, "unite")?.nom || getRelation(product, "unite")?.symbole || "unité(s)"
+        const unit = existing.units.get(unitId) ?? { label: unitLabel, quantity: 0 }
+        unit.quantity += toNumber(line.quantite)
+        existing.units.set(unitId, unit)
         grouped.set(productId, existing)
       })
     })
@@ -598,6 +632,8 @@ export default function ShopReportsPage() {
         brand: entry.brand,
         quantity: entry.quantity,
         revenue: entry.revenue,
+        transactions: entry.sales.size,
+        unitBreakdown: Array.from(entry.units.values()),
         turnoverRate: entry.quantity > 0 ? (entry.revenue / entry.quantity).toFixed(2) : "0.00",
       }))
       .sort((a, b) => b.revenue - a.revenue)
@@ -864,15 +900,65 @@ export default function ShopReportsPage() {
       .sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0))
   }, [data.approvisionnements])
 
+  const cashCurrencies = useMemo(
+    () => Array.from(new Set(data.cashTransactions.map((transaction) => transaction.devise_code).filter((code): code is string => Boolean(code)))).sort(),
+    [data.cashTransactions],
+  )
+
+  const cashBookTransactions = useMemo(() => {
+    return data.cashTransactions
+      .filter((transaction) => {
+        const date = parseDate(transaction.date_mouvement ?? transaction.created_at)
+        return (!cashBookCurrency || transaction.devise_code === cashBookCurrency) && isWithinRange(date, startDate, endDate)
+      })
+      .sort((a, b) => (parseDate(a.date_mouvement ?? a.created_at)?.getTime() ?? 0) - (parseDate(b.date_mouvement ?? b.created_at)?.getTime() ?? 0))
+  }, [data.cashTransactions, cashBookCurrency, startDate, endDate])
+
+  const cashOpeningBalance = useMemo(() => {
+    const currencyTransactions = data.cashTransactions
+      .filter((transaction) => !cashBookCurrency || transaction.devise_code === cashBookCurrency)
+      .sort((a, b) => (parseDate(a.date_mouvement ?? a.created_at)?.getTime() ?? 0) - (parseDate(b.date_mouvement ?? b.created_at)?.getTime() ?? 0))
+    const previousTransaction = currencyTransactions
+      .filter((transaction) => (parseDate(transaction.date_mouvement ?? transaction.created_at)?.getTime() ?? 0) < startDate.getTime())
+      .at(-1)
+
+    return previousTransaction
+      ? toNumber(previousTransaction.solde_apres)
+      : toNumber(cashBookTransactions[0]?.solde_avant)
+  }, [data.cashTransactions, cashBookCurrency, startDate, cashBookTransactions])
+
+  const cashLedgerRows = useMemo(() => {
+    let runningBalance = cashOpeningBalance
+
+    return cashBookTransactions.map((transaction) => {
+      const amount = toNumber(transaction.montant)
+      const isEntry = transaction.type === "entree"
+      const calculatedBalance = runningBalance + (isEntry ? amount : -amount)
+      runningBalance = transaction.solde_apres == null ? calculatedBalance : toNumber(transaction.solde_apres)
+
+      return {
+        ...transaction,
+        date: parseDate(transaction.date_mouvement ?? transaction.created_at),
+        isEntry,
+        amount,
+        balance: runningBalance,
+        label: transaction.description || (isEntry ? "Encaissement" : "Décaissement"),
+      }
+    })
+  }, [cashBookTransactions, cashOpeningBalance])
+
   const cashSummary = useMemo(() => {
-    const entries = data.cashTransactions.filter((transaction) => transaction.type === "entree")
-    const exits = data.cashTransactions.filter((transaction) => transaction.type === "sortie")
+    const summaryTransactions = cashBookCurrency
+      ? data.cashTransactions.filter((transaction) => transaction.devise_code === cashBookCurrency)
+      : data.cashTransactions
+    const entries = summaryTransactions.filter((transaction) => transaction.type === "entree")
+    const exits = summaryTransactions.filter((transaction) => transaction.type === "sortie")
     const totalEntries = entries.reduce((sum, transaction) => sum + toNumber(transaction.montant), 0)
     const totalExits = exits.reduce((sum, transaction) => sum + toNumber(transaction.montant), 0)
     const balance = totalEntries - totalExits
 
     const byType = Array.from(
-      data.cashTransactions.reduce((map, transaction) => {
+      summaryTransactions.reduce((map, transaction) => {
         const key = transaction.type || "inconnu"
         const current = map.get(key) ?? { label: key, amount: 0, count: 0 }
         current.amount += toNumber(transaction.montant)
@@ -888,7 +974,7 @@ export default function ShopReportsPage() {
       balance,
       byType: byType.map(([, value]) => value),
     }
-  }, [data.cashTransactions])
+  }, [data.cashTransactions, cashBookCurrency])
 
   const caisseRows = useMemo(() => {
     return data.caisses.map((caisse) => ({
@@ -1027,6 +1113,39 @@ export default function ShopReportsPage() {
       return
     }
 
+    if (selectedTab === "cashbook") {
+      downloadCsv(fileName, [
+        ["N°", "Date", "N° pièce", "Libellé", "Type", "Entrée", "Sortie", "Solde", "Devise"],
+        ["", format(startDate, "yyyy-MM-dd"), "", "Report à nouveau", "", "", "", cashOpeningBalance, cashBookCurrency],
+        ...cashLedgerRows.map((row, index) => [
+          index + 1,
+          row.date ? format(row.date, "yyyy-MM-dd HH:mm") : "",
+          row.reference_id,
+          row.label,
+          row.type,
+          row.isEntry ? row.amount : "",
+          row.isEntry ? "" : row.amount,
+          row.balance,
+          cashBookCurrency,
+        ]),
+      ])
+      return
+    }
+
+    if (selectedTab === "products") {
+      downloadCsv(fileName, [
+        ["SKU", "Produit", "Unités vendues", "Nombre de ventes", "Revenu"],
+        ...productSales.map((product) => [
+          product.sku,
+          product.name,
+          product.unitBreakdown.map((unit) => `${unit.quantity} ${unit.label}`).join(" + "),
+          product.transactions,
+          product.revenue,
+        ]),
+      ])
+      return
+    }
+
     if (selectedTab === "finance") {
       downloadCsv(fileName, [
         ["Indicateur", "Valeur"],
@@ -1070,6 +1189,138 @@ export default function ShopReportsPage() {
       ["Stock", stockValue],
       ["Clients fidèles", loyalCustomers.length],
     ])
+  }
+
+  const buildSelectedReportHtml = () => {
+    const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>\"]/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+    })[character] ?? character)
+    const formatReportDate = (value: Date | null, withTime = false) => value ? format(value, withTime ? "dd/MM/yyyy HH:mm" : "dd/MM/yyyy") : "-"
+    const reportMoney = (value: number, currency = cashBookCurrency) => escapeHtml(formatMoney(value, currency || undefined))
+    const periodLabel = `${format(startDate, "dd/MM/yyyy")} - ${format(endDate, "dd/MM/yyyy")}`
+    const currencyLabel = devises.find((devise) => devise.code === cashBookCurrency)?.symbole || cashBookCurrency || "-"
+    const tableStyle = `width:100%;border-collapse:collapse;margin:16px 0 24px;font-size:11px;`
+    const cellStyle = `border-bottom:1px solid #dfe5e1;padding:8px 7px;text-align:left;vertical-align:top;`
+    const heading = (number: number, title: string) => `<h2>${number}. ${escapeHtml(title)}</h2>`
+    const section = (number: number, title: string, content: string) => `<section>${heading(number, title)}${content}</section>`
+    const reportTable = (headers: string[], rows: string[][]) => `<table style="${tableStyle}"><thead><tr>${headers.map((header) => `<th style="${cellStyle}color:#68736c;text-transform:uppercase;font-size:10px;">${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${rows.length ? rows.map((row) => `<tr>${row.map((cell) => `<td style="${cellStyle}">${cell}</td>`).join("")}</tr>`).join("") : `<tr><td colspan="${headers.length}" style="${cellStyle}color:#77817a;">Aucune donnée sur la période.</td></tr>`}</tbody></table>`
+    const summaryItem = (label: string, value: string) => `<div class="summary-item"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`
+    const productUnitLabel = (product: typeof productSales[number]) => product.unitBreakdown.map((unit) => `${unit.quantity.toLocaleString("fr-FR")} ${escapeHtml(unit.label)}`).join(" + ") || `${product.quantity.toLocaleString("fr-FR")} unité(s)`
+    const productTotal = productSales.reduce((sum, product) => sum + product.revenue, 0)
+    const expenseRows = cashLedgerRows.filter((row) => !row.isEntry)
+    const expenseTotal = expenseRows.reduce((sum, row) => sum + row.amount, 0)
+    const purchaseRows = stockMovementRows.filter((row) => isWithinRange(row.date, startDate, endDate))
+    const creditDue = saleRows.reduce((sum, sale) => sum + toNumber((sale as Record<string, any>).reste_a_payer), 0)
+    const expiredLots = data.lots.filter((lot) => {
+      const expiration = parseDate(lot.date_expiration)
+      return expiration !== null && expiration <= endDate
+    }).length
+    const paymentGroups = Array.from(saleRows.reduce((groups, sale) => {
+      const label = String(sale.paymentMethod || "Non renseigné")
+      groups.set(label, (groups.get(label) ?? 0) + sale.revenue)
+      return groups
+    }, new Map<string, number>()).entries())
+    const journalRows = [
+      ...saleRows.map((sale) => ({
+        date: sale.saleDate,
+        type: "Vente",
+        description: (sale.lignes ?? []).map((line) => getProductLabel(line.produit ?? productIndex.get(Number(line.id_produit)) ?? null)).join(", ") || sale.code || `Vente #${sale.id}`,
+        amount: reportMoney(sale.revenue),
+      })),
+      ...expenseRows.map((row) => ({ date: row.date, type: "Dépense", description: row.label, amount: `-${reportMoney(row.amount)}` })),
+      ...purchaseRows.map((row) => ({ date: row.date, type: "Réception stock", description: `${row.reference} · ${row.supplier}`, amount: `+${row.quantity.toLocaleString("fr-FR")} unité(s)` })),
+    ].sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0)).slice(0, 100)
+
+    let title = "Rapport général d'activité"
+    let orientation = "portrait"
+    let content = ""
+
+    if (selectedTab === "cashbook") {
+      title = "Livre de caisse"
+      orientation = "landscape"
+      const entries = cashLedgerRows.filter((row) => row.isEntry).reduce((sum, row) => sum + row.amount, 0)
+      const exits = expenseTotal
+      const ledger = [
+        ["", format(startDate, "dd/MM/yyyy"), "", "Report à nouveau", "", "", "", reportMoney(cashOpeningBalance), ""],
+        ...cashLedgerRows.map((row, index) => [
+          String(index + 1).padStart(2, "0"),
+          formatReportDate(row.date, true),
+          String(row.reference_id ?? ""),
+          escapeHtml(row.label),
+          row.reference_type === "vente" ? "Comptant" : escapeHtml(`${row.utilisateur_prenom ?? ""} ${row.utilisateur_nom ?? ""}`.trim() || "-"),
+          row.isEntry ? reportMoney(row.amount) : "",
+          row.isEntry ? "" : reportMoney(row.amount),
+          reportMoney(row.balance),
+          row.reference_type === "vente" ? "Espèces" : escapeHtml(row.type || "-"),
+        ]),
+      ]
+      const closingBalance = cashLedgerRows.at(-1)?.balance ?? cashOpeningBalance
+      ledger.push(["", "", "", "TOTAUX", "", reportMoney(entries), reportMoney(exits), reportMoney(closingBalance), ""])
+      content = `<div class="report-meta"><strong>Période :</strong> ${escapeHtml(periodLabel)} <span><strong>Devise :</strong> ${escapeHtml(currencyLabel)}</span></div>${reportTable(["N°", "Date", "N° pièce", "Libellé", "Fournisseur ou client", "Entrée", "Sortie", "Soldes", "Observation"], ledger)}<p class="note">Ce livre reprend uniquement les mouvements enregistrés dans la devise sélectionnée. Les soldes avant et après sont ceux enregistrés par la caisse.</p>`
+    } else if (selectedTab === "products") {
+      title = "Rapport des produits"
+      orientation = "landscape"
+      const rows = productSales.map((product, index) => [
+        String(index + 1),
+        `<strong>${escapeHtml(product.name)}</strong><br><span class="muted">${escapeHtml(product.sku)}</span>`,
+        escapeHtml(productUnitLabel(product)),
+        product.transactions.toLocaleString("fr-FR"),
+        reportMoney(product.revenue),
+      ])
+      content = `<div class="report-meta">${escapeHtml(periodLabel)}</div><div class="summary">${summaryItem("Produits vendus", productSales.length.toLocaleString("fr-FR"))}${summaryItem("Chiffre d'affaires", reportMoney(productTotal))}</div>${reportTable(["N°", "Produit", "Unités vendues", "Ventes", "Revenu"], rows)}<p class="note">Classement par chiffre d'affaires. Les unités sont regroupées à partir des unités réellement enregistrées sur chaque ligne de vente.</p>`
+    } else if (selectedTab === "sales") {
+      title = "Rapport des ventes"
+      orientation = "landscape"
+      content = `${section(1, "Résumé des ventes", `<div class="summary">${summaryItem("Chiffre d'affaires", reportMoney(currentRevenue))}${summaryItem("Transactions", currentTransactions.toLocaleString("fr-FR"))}${summaryItem("Panier moyen", reportMoney(currentAverageBasket))}</div>`)}${section(2, "Détail des ventes", reportTable(["Date", "Référence", "Client", "Vendeur", "Quantité", "Montant"], saleRows.map((sale) => [formatReportDate(sale.saleDate, true), escapeHtml(sale.code || sale.id), escapeHtml(getFullName(sale.client)), escapeHtml(getFullName(sale.seller)), sale.quantity.toLocaleString("fr-FR"), reportMoney(sale.revenue)])))}${section(3, "Ventes par jour", reportTable(["Date", "Chiffre d'affaires", "Transactions", "Panier moyen"], aggregateSalesByGranularity(saleRows, "day").map((row) => [escapeHtml(row.label), reportMoney(row.revenue), String(row.transactions), reportMoney(row.averageBasket)])))}${section(4, "Produits les plus vendus", reportTable(["Produit", "Quantité", "Revenu"], productSales.slice(0, 10).map((product) => [escapeHtml(product.name), escapeHtml(productUnitLabel(product)), reportMoney(product.revenue)])))}`
+    } else if (selectedTab === "stock") {
+      title = "Rapport de stock"
+      orientation = "landscape"
+      content = `${section(1, "État du stock", `<div class="summary">${summaryItem("Valeur du stock", reportMoney(stockValue))}${summaryItem("Produits actifs", inventoryRows.length.toLocaleString("fr-FR"))}${summaryItem("Ruptures", outOfStockRows.length.toLocaleString("fr-FR"))}${summaryItem("À réapprovisionner", restockRows.length.toLocaleString("fr-FR"))}</div>`)}${section(2, "Inventaire détaillé", reportTable(["Référence", "Produit", "Catégorie", "Stock réel", "Stock théorique", "Écart", "Valeur"], inventoryRows.map((row) => [escapeHtml(row.sku), escapeHtml(row.name), escapeHtml(row.category), row.actualStock.toLocaleString("fr-FR"), row.theoreticalStock.toLocaleString("fr-FR"), row.variance.toLocaleString("fr-FR"), reportMoney(row.stockValue)])))}${section(3, "Approvisionnements", reportTable(["Date", "Référence", "Fournisseur", "Quantité", "Valeur"], purchaseRows.map((row) => [formatReportDate(row.date, true), escapeHtml(row.reference), escapeHtml(row.supplier), row.quantity.toLocaleString("fr-FR"), reportMoney(row.totalValue)])))}`
+    } else if (selectedTab === "finance") {
+      title = "Rapport financier"
+      content = `${section(1, "Indicateurs financiers", `<div class="summary">${summaryItem("Chiffre d'affaires", reportMoney(caTtc))}${summaryItem("Marge brute", reportMoney(grossMargin))}${summaryItem("Encaissements", reportMoney(cashSummary.totalEntries))}${summaryItem("Décaissements", reportMoney(cashSummary.totalExits))}${summaryItem("Solde net de caisse", reportMoney(cashSummary.balance))}</div>`)}${section(2, "Bénéfice par jour", reportTable(["Date", "Devise", "Bénéfice"], profitByDay.map((row) => [escapeHtml(row.date_vente), escapeHtml(row.devise_code || ""), reportMoney(toNumber(row.benefice_total), row.devise_code || undefined)])))}${section(3, "Bénéfice par produit", reportTable(["Produit", "Quantité", "Chiffre d'affaires", "Bénéfice"], profitByProduct.map((row) => [escapeHtml(row.produit_nom || row.produit_code || `#${row.id_produit}`), toNumber(row.quantite_vendue).toLocaleString("fr-FR"), reportMoney(toNumber(row.chiffre_affaires), row.devise_code || undefined), reportMoney(toNumber(row.benefice_total), row.devise_code || undefined)])))}${section(4, "Mouvements de caisse", reportTable(["Type", "Nombre", "Montant"], cashSummary.byType.map((row) => [escapeHtml(row.label), String(row.count), reportMoney(row.amount)])))}`
+    } else if (selectedTab === "clients") {
+      title = "Rapport clients"
+      orientation = "landscape"
+      content = `${section(1, "Fidélisation", `<div class="summary">${summaryItem("Clients actifs", salesByClient.length.toLocaleString("fr-FR"))}${summaryItem("Clients fidèles", loyalCustomers.length.toLocaleString("fr-FR"))}${summaryItem("Nouveaux clients", newCustomers.length.toLocaleString("fr-FR"))}</div>`)}${section(2, "Activité des clients", reportTable(["Client", "Contact", "Transactions", "Chiffre d'affaires", "Panier moyen", "Premier achat", "Dernier achat"], salesByClient.map((client) => [escapeHtml(client.name), escapeHtml(client.contact), String(client.transactions), reportMoney(client.revenue), reportMoney(client.averageBasket), formatReportDate(client.firstPurchase), formatReportDate(client.lastPurchase)])))}`
+    } else if (selectedTab === "personnel") {
+      title = "Rapport de performance de l'équipe"
+      content = `${section(1, "Performance par vendeur", reportTable(["Membre", "Rôle", "Nombre de ventes", "Chiffre d'affaires", "Panier moyen"], salesBySeller.map((seller) => [escapeHtml(seller.name), "Vendeur", String(seller.transactions), reportMoney(seller.revenue), reportMoney(seller.averageBasket)])))}`
+    } else {
+      const dailyRows = aggregateSalesByGranularity(saleRows, "day").map((row) => [escapeHtml(row.label), reportMoney(row.revenue), row.transactions.toLocaleString("fr-FR"), reportMoney(row.averageBasket)])
+      const topProductRows = productSales.slice(0, 10).map((product) => [escapeHtml(product.name), escapeHtml(productUnitLabel(product)), reportMoney(product.revenue)])
+      const expenseCategoryRows = Array.from(expenseRows.reduce((groups, row) => {
+        const label = row.label || "Autres dépenses"
+        groups.set(label, (groups.get(label) ?? 0) + row.amount)
+        return groups
+      }, new Map<string, number>()).entries()).map(([label, amount]) => [escapeHtml(label), reportMoney(amount)])
+      const expenseDetailRows = expenseRows.map((row) => [formatReportDate(row.date, true), escapeHtml(row.label), `-${reportMoney(row.amount)}`])
+      const purchaseDetailRows = purchaseRows.map((row) => [formatReportDate(row.date, true), escapeHtml(`${row.reference} · ${row.supplier}`), `+${row.quantity.toLocaleString("fr-FR")} unité(s)`])
+      const inventoryDetailRows = inventoryRows.map((row) => [escapeHtml(row.name), row.actualStock.toLocaleString("fr-FR"), reportMoney(row.stockValue)])
+      const teamRows = salesBySeller.map((seller) => [escapeHtml(seller.name), "Vendeur", seller.transactions.toLocaleString("fr-FR"), reportMoney(seller.revenue)])
+      const journalDetailRows = journalRows.map((row) => [formatReportDate(row.date, true), escapeHtml(row.type), escapeHtml(row.description), row.amount])
+      const expenses = expenseTotal
+      const netProfit = grossMargin - expenses
+      const alertRows = [
+        [`Variation du chiffre d'affaires : ${formatSignedPercent(revenueGrowth)}`],
+        [`${restockRows.length} produit(s) sous le seuil de réapprovisionnement`],
+        [`${outOfStockRows.length} produit(s) en rupture`],
+        [`${expiredLots} lot(s) arrivé(s) à expiration avant la fin de période`],
+      ]
+      content = `${section(1, "Résumé exécutif", `<div class="summary">${summaryItem("Ventes", reportMoney(currentRevenue))}${summaryItem("Bénéfice brut", reportMoney(grossMargin))}${summaryItem("Décaissements", reportMoney(expenses))}${summaryItem("Crédits dus", reportMoney(creditDue))}${summaryItem("Transactions", currentTransactions.toLocaleString("fr-FR"))}</div>`)}${section(2, "Rapport des ventes", `<h3>Évolution journalière</h3>${reportTable(["Date", "Chiffre d'affaires", "Transactions", "Panier moyen"], dailyRows)}<h3>Produits les plus vendus</h3>${reportTable(["Produit", "Unités vendues", "Revenu"], topProductRows)}<h3>Modes de paiement</h3>${reportTable(["Mode", "Montant"], paymentGroups.map(([label, amount]) => [escapeHtml(label), reportMoney(amount)]))}`)}${section(3, "Rapport des produits", reportTable(["Produit", "Unités", "Ventes", "Revenu"], productSales.map((product) => [escapeHtml(product.name), escapeHtml(productUnitLabel(product)), product.transactions.toLocaleString("fr-FR"), reportMoney(product.revenue)])))}${section(4, "Dépenses", `<div class="summary">${summaryItem("Total des décaissements", reportMoney(expenses))}${summaryItem("Nombre", expenseRows.length.toLocaleString("fr-FR"))}</div><h3>Répartition par libellé</h3>${reportTable(["Libellé", "Montant"], expenseCategoryRows)}<h3>Détail</h3>${reportTable(["Date", "Description", "Montant"], expenseDetailRows)}`)}${section(5, "Achats et réceptions de stock", reportTable(["Date", "Produit / fournisseur", "Quantité"], purchaseDetailRows))}${section(6, "État du stock", `<div class="summary">${summaryItem("Valeur du stock", reportMoney(stockValue))}${summaryItem("Produits actifs", inventoryRows.length.toLocaleString("fr-FR"))}${summaryItem("En rupture", outOfStockRows.length.toLocaleString("fr-FR"))}${summaryItem("Stock bas", restockRows.length.toLocaleString("fr-FR"))}${summaryItem("Sans prix d'achat", inventoryRows.filter((row) => row.avgCost <= 0).length.toLocaleString("fr-FR"))}${summaryItem("Lots expirés", expiredLots.toLocaleString("fr-FR"))}</div>${reportTable(["Produit", "Stock actuel", "Valeur estimée"], inventoryDetailRows)}`)}${section(7, "Performance de l'équipe", reportTable(["Membre", "Rôle", "Nombre de ventes", "Chiffre d'affaires"], teamRows))}${section(8, "Analyse financière", `<div class="summary">${summaryItem("Chiffre d'affaires", reportMoney(currentRevenue))}${summaryItem("Coût des marchandises", `-${reportMoney(Math.max(0, currentRevenue - grossMargin))}`)}${summaryItem("Marge brute", reportMoney(grossMargin))}${summaryItem("Décaissements", `-${reportMoney(expenses)}`)}${summaryItem("Bénéfice net estimé", reportMoney(netProfit))}${summaryItem("Marge bénéficiaire", `${currentRevenue > 0 ? (grossMargin / currentRevenue * 100).toFixed(1) : "0.0"}%`)}</div>`)}${section(9, "Alertes et observations", reportTable(["Observation"], alertRows))}${section(10, "Journal des transactions", reportTable(["Date", "Type", "Description", "Montant / quantité"], journalDetailRows))}`
+    }
+
+    const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>
+      @page{size:A4 ${orientation};margin:14mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#202923;font-size:12px;margin:0}header{text-align:center;border-bottom:4px solid #168052;padding:0 0 14px;margin-bottom:20px}h1{color:#168052;font-size:25px;margin:0 0 6px}header strong{font-size:17px}.report-meta{color:#58625b;margin:12px 0 18px;text-align:center}.report-meta span{margin-left:24px}h2{color:#168052;font-size:17px;border-bottom:2px solid #168052;padding-bottom:5px;margin:24px 0 12px}h3{font-size:13px;margin:18px 0 6px}th{background:#f1f5f2}td{text-align:left}.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0 22px}.summary-item{border:1px solid #dfe5e1;padding:12px}.summary-item span{display:block;color:#66716a;text-transform:uppercase;font-size:9px;margin-bottom:6px}.summary-item strong{font-size:16px;color:#168052}.note{font-style:italic;color:#6c756f;line-height:1.5;margin:18px 0}.muted{color:#77817a;font-size:10px}footer{border-top:1px solid #dfe5e1;color:#9aa29c;text-align:center;padding-top:10px;margin-top:28px;font-size:10px}section{break-inside:auto}tr{break-inside:avoid}thead{display:table-header-group}@media print{h2{break-after:avoid}.summary-item{break-inside:avoid}}
+    </style></head><body><header><h1>${escapeHtml(title)}</h1><strong>Xtrashop</strong><div class="report-meta"><strong>Période :</strong> ${escapeHtml(periodLabel)}${selectedTab === "cashbook" ? ` <span><strong>Devise :</strong> ${escapeHtml(currencyLabel)}</span>` : ""}</div></header><main>${content}</main><footer>Rapport généré le ${escapeHtml(format(new Date(), "dd/MM/yyyy HH:mm"))} · BiasharApp</footer></body></html>`
+    return {
+      html,
+      orientation,
+      filename: `rapport_${selectedTab}_${format(startDate, "yyyy-MM-dd")}_${format(endDate, "yyyy-MM-dd")}.pdf`,
+    }
   }
 
   const generatePrintableReport = async () => {
@@ -1200,59 +1451,37 @@ export default function ShopReportsPage() {
   }
 
   async function downloadReportPdf() {
-    const mapping: Record<string, string | null> = {
-      sales: '/api/rapports/ventes/pdf',
-      stock: '/api/rapports/stock/pdf',
-      finance: null,
-      clients: null,
-      personnel: null,
-      overview: null,
-    }
-
-    const path = mapping[selectedTab]
-    if (!path) {
-      // fallback to printable HTML if no PDF endpoint
-      generatePrintableReport()
-      return
-    }
-
-    setLoading(true)
+    setExportingPdf(true)
     try {
-      const token = (typeof window !== 'undefined' && (localStorage.getItem('token') || localStorage.getItem('authToken'))) || ''
-      const headers: Record<string, string> = { Accept: 'application/pdf' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+      const { html, orientation, filename } = buildSelectedReportHtml()
+      const headers = new Headers({ Accept: "application/pdf", "Content-Type": "application/json" })
+      const token = getStoredToken()
+      if (token) headers.set("Authorization", `Bearer ${token}`)
 
-      const res = await fetch(path, { method: 'GET', headers, credentials: 'include' })
+      const res = await fetch(`${getBackendBaseUrl()}/rapports/html-to-pdf`, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        body: JSON.stringify({ html, filename, orientation }),
+      })
       if (!res.ok) {
-        // Try signed URL fallback
-        try {
-          const signedRes = await fetch(path.replace('/pdf', '/signed'), { method: 'POST', headers, credentials: 'include' })
-          if (signedRes.ok) {
-            const body = await signedRes.json()
-            if (body?.url) {
-              window.open(body.url, '_blank')
-              return
-            }
-          }
-        } catch (e) {
-          // ignore and continue to throw below
-        }
-        throw new Error('Echec génération PDF')
+        const payload = await res.json().catch(() => null)
+        throw new Error(payload?.message || `Échec de génération du PDF (${res.status})`)
       }
 
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `rapport_${selectedTab}.pdf`
+      a.download = filename
       document.body.appendChild(a)
       a.click()
       a.remove()
-      URL.revokeObjectURL(url)
-    } catch (err: any) {
-      alert('Erreur lors du téléchargement du PDF: ' + (err?.message || String(err)))
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      alert("Erreur lors du téléchargement du PDF : " + (err instanceof Error ? err.message : String(err)))
     } finally {
-      setLoading(false)
+      setExportingPdf(false)
     }
   }
 
@@ -1314,17 +1543,13 @@ export default function ShopReportsPage() {
               <Printer className="mr-2 h-4 w-4" />
               Imprimer (page)
             </Button>
-            <Button variant="secondary" onClick={generatePrintableReport}>
-              <Printer className="mr-2 h-4 w-4" />
-              Imprimer complet
-            </Button>
             <Button variant="secondary" onClick={handleExport}>
               <Download className="mr-2 h-4 w-4" />
               Exporter CSV
             </Button>
-            <Button variant="secondary" onClick={() => downloadReportPdf()}>
+            <Button variant="secondary" onClick={downloadReportPdf} disabled={exportingPdf}>
               <Download className="mr-2 h-4 w-4" />
-              Télécharger PDF
+              {exportingPdf ? "Génération du PDF…" : "Télécharger PDF"}
             </Button>
           </div>
         </div>
@@ -1423,6 +1648,14 @@ export default function ShopReportsPage() {
           <TabsTrigger value="personnel" className="gap-2 rounded-full border data-[state=active]:bg-slate-950 data-[state=active]:text-white">
             <Clock className="h-4 w-4" />
             Personnel
+          </TabsTrigger>
+          <TabsTrigger value="cashbook" className="gap-2 rounded-full border data-[state=active]:bg-slate-950 data-[state=active]:text-white">
+            <Wallet className="h-4 w-4" />
+            Livre de caisse
+          </TabsTrigger>
+          <TabsTrigger value="products" className="gap-2 rounded-full border data-[state=active]:bg-slate-950 data-[state=active]:text-white">
+            <Package className="h-4 w-4" />
+            Produits vendus
           </TabsTrigger>
         </TabsList>
 
@@ -2117,6 +2350,66 @@ export default function ShopReportsPage() {
                       </TableRow>
                     )
                   })}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="cashbook" className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between print:hidden">
+            <div>
+              <h2 className="text-xl font-semibold">Livre de caisse</h2>
+              <p className="text-sm text-muted-foreground">Journal des mouvements et soldes enregistrés pour une seule devise.</p>
+            </div>
+            <div className="w-full sm:w-56">
+              <p className="mb-1 text-xs text-muted-foreground">Devise de la caisse</p>
+              <Select value={cashBookCurrency || cashCurrencies[0] || ""} onValueChange={setCashBookCurrency}>
+                <SelectTrigger><SelectValue placeholder="Choisir une devise" /></SelectTrigger>
+                <SelectContent>
+                  {cashCurrencies.map((code) => <SelectItem key={code} value={code}>{devises.find((devise) => devise.code === code)?.symbole || code} · {code}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <MetricCard title="Report à nouveau" value={formatMoney(cashOpeningBalance, currencyLabelFor(cashBookCurrency, devises))} icon={History} tone="bg-slate-700" />
+            <MetricCard title="Entrées période" value={formatMoney(cashLedgerRows.filter((row) => row.isEntry).reduce((sum, row) => sum + row.amount, 0), currencyLabelFor(cashBookCurrency, devises))} icon={TrendingUp} tone="bg-emerald-600" />
+            <MetricCard title="Sorties période" value={formatMoney(cashLedgerRows.filter((row) => !row.isEntry).reduce((sum, row) => sum + row.amount, 0), currencyLabelFor(cashBookCurrency, devises))} icon={TrendingDown} tone="bg-rose-600" />
+          </div>
+          <Card>
+            <CardContent className="overflow-x-auto p-0">
+              <Table>
+                <TableHeader><TableRow><TableHead>N°</TableHead><TableHead>Date</TableHead><TableHead>N° pièce</TableHead><TableHead>Libellé</TableHead><TableHead>Fournisseur ou client</TableHead><TableHead className="text-right">Entrée</TableHead><TableHead className="text-right">Sortie</TableHead><TableHead className="text-right">Solde</TableHead><TableHead>Observation</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  <TableRow className="font-semibold"><TableCell>-</TableCell><TableCell>{format(startDate, "dd/MM/yyyy")}</TableCell><TableCell>-</TableCell><TableCell colSpan={4}>Report à nouveau</TableCell><TableCell className="text-right">{formatMoney(cashOpeningBalance, currencyLabelFor(cashBookCurrency, devises))}</TableCell><TableCell>-</TableCell></TableRow>
+                  {cashLedgerRows.map((row, index) => <TableRow key={row.id}><TableCell className="text-muted-foreground">{String(index + 1).padStart(2, "0")}</TableCell><TableCell>{formatReportDate(row.date, true)}</TableCell><TableCell>{row.reference_id ?? "-"}</TableCell><TableCell>{row.label}</TableCell><TableCell>{row.reference_type === "vente" ? "Comptant" : `${row.utilisateur_prenom ?? ""} ${row.utilisateur_nom ?? ""}`.trim() || "-"}</TableCell><TableCell className="text-right font-medium text-emerald-600">{row.isEntry ? formatMoney(row.amount, currencyLabelFor(cashBookCurrency, devises)) : "-"}</TableCell><TableCell className="text-right font-medium text-rose-600">{row.isEntry ? "-" : formatMoney(row.amount, currencyLabelFor(cashBookCurrency, devises))}</TableCell><TableCell className="text-right font-semibold">{formatMoney(row.balance, currencyLabelFor(cashBookCurrency, devises))}</TableCell><TableCell className="text-muted-foreground">{row.reference_type === "vente" ? "Espèces" : row.type || "-"}</TableCell></TableRow>)}
+                  {cashLedgerRows.length === 0 && <TableRow><TableCell colSpan={9} className="py-10 text-center text-muted-foreground">Aucun mouvement de caisse pour cette période et cette devise.</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="products" className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold">Rapport des produits vendus</h2>
+              <p className="text-sm text-muted-foreground">Classement des ventes par produit et par unité sur la période.</p>
+            </div>
+            <div className="text-sm text-muted-foreground">{format(startDate, "dd/MM/yyyy")} - {format(endDate, "dd/MM/yyyy")}</div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <MetricCard title="Produits vendus" value={productSales.length.toLocaleString("fr-FR")} icon={Package} tone="bg-emerald-700" />
+            <MetricCard title="Revenu total" value={formatMoney(productSales.reduce((sum, product) => sum + product.revenue, 0))} icon={DollarSign} tone="bg-sky-700" />
+          </div>
+          <Card>
+            <CardContent className="overflow-x-auto p-0">
+              <Table>
+                <TableHeader><TableRow><TableHead>N°</TableHead><TableHead>Produit</TableHead><TableHead>Unités vendues</TableHead><TableHead className="text-right">Ventes</TableHead><TableHead className="text-right">Revenu</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {productSales.map((product, index) => <TableRow key={product.productId}><TableCell className="text-muted-foreground">{index + 1}</TableCell><TableCell><div className="font-medium">{product.name}</div><div className="text-xs text-muted-foreground">{product.sku}</div></TableCell><TableCell>{product.unitBreakdown.map((unit) => `${unit.quantity.toLocaleString("fr-FR")} ${unit.label}`).join(" + ") || `${product.quantity.toLocaleString("fr-FR")} unité(s)`}</TableCell><TableCell className="text-right">{product.transactions}</TableCell><TableCell className="text-right font-semibold text-emerald-700">{formatMoney(product.revenue)}</TableCell></TableRow>)}
+                  {productSales.length === 0 && <TableRow><TableCell colSpan={5} className="py-10 text-center text-muted-foreground">Aucune vente de produit sur cette période.</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </CardContent>

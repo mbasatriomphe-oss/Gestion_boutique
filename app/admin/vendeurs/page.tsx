@@ -38,7 +38,7 @@ interface Vente {
   client?: { id: number; nom: string; prenom?: string }
 }
 
-const EMPTY_FORM = { nom: "", prenom: "", email: "", password: "", telephone: "", adresse: "" }
+const EMPTY_FORM = { nom: "", prenom: "", email: "", password: "", password_confirmation: "", telephone: "", adresse: "" }
 
 export default function VendeursPage() {
   const [vendeurs, setVendeurs] = useState<Vendeur[]>([])
@@ -107,7 +107,7 @@ export default function VendeursPage() {
 
   const openEdit = (v: Vendeur) => {
     setEditing(v)
-    setFormData({ nom: v.nom, prenom: v.prenom, email: v.email, password: "", telephone: v.telephone ?? "", adresse: v.adresse ?? "" })
+    setFormData({ nom: v.nom, prenom: v.prenom, email: v.email, password: "", password_confirmation: "", telephone: v.telephone ?? "", adresse: v.adresse ?? "" })
     setFormError("")
     setShowDialog(true)
   }
@@ -134,7 +134,14 @@ export default function VendeursPage() {
         telephone: formData.telephone.trim(),
         adresse: formData.adresse.trim(),
       }
-      if (formData.password.trim()) body.password = formData.password
+      if (formData.password.trim()) {
+        if (editing && formData.password !== formData.password_confirmation) {
+          setFormError("La confirmation du mot de passe ne correspond pas.")
+          return
+        }
+        body.password = formData.password
+        if (editing) body.password_confirmation = formData.password_confirmation
+      }
 
       if (editing) {
         const res = await backendRequest<{ data: Vendeur }>(`/vendeurs/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
@@ -294,6 +301,18 @@ export default function VendeursPage() {
                   <Label htmlFor="password">{editing ? "Nouveau mot de passe (laisser vide pour ne pas changer)" : "Mot de passe *"}</Label>
                   <Input id="password" type="password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} placeholder={editing ? "Laisser vide" : "Min. 6 caractères"} />
                 </div>
+                {editing && formData.password && (
+                  <div>
+                    <Label htmlFor="password_confirmation">Confirmer le nouveau mot de passe</Label>
+                    <Input
+                      id="password_confirmation"
+                      type="password"
+                      value={formData.password_confirmation}
+                      onChange={e => setFormData({ ...formData, password_confirmation: e.target.value })}
+                      required
+                    />
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <Label htmlFor="telephone">Téléphone</Label>

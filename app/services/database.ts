@@ -4,8 +4,8 @@ import { backendRequest } from "./backend"
 export interface Customer {
   id: string
   name: string
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   address?: string
   city?: string
   country?: string
@@ -59,12 +59,13 @@ export interface SalesReport {
 interface BackendClient {
   id: number
   nom: string
-  post_nom: string
-  prenom: string
-  adresse: string
-  ville: string
-  pays: string
-  contact: string
+  post_nom?: string | null
+  prenom?: string | null
+  adresse?: string | null
+  ville?: string | null
+  pays?: string | null
+  contact?: string | null
+  email?: string | null
   created_at?: string
   updated_at?: string
 }
@@ -86,8 +87,11 @@ class DatabaseService {
     return {
       id: String(client.id),
       name: fullName || client.nom,
-      email: client.contact,
-      phone: client.contact,
+      email: client.email ?? "",
+      phone: client.contact ?? "",
+      address: client.adresse ?? "",
+      city: client.ville ?? "",
+      country: client.pays ?? "",
       loyaltyPoints: 0,
       totalSpent: 0,
       createdAt: client.created_at ? new Date(client.created_at) : new Date(),
@@ -96,18 +100,15 @@ class DatabaseService {
   }
 
   private toBackendClientPayload(customer: Customer) {
-    const [firstWord, ...rest] = customer.name.trim().split(/\s+/)
-    const primaryName = firstWord || customer.name || "Client"
-    const secondaryName = rest.length > 0 ? rest.join(" ") : "N/A"
-
     return {
-      nom: primaryName,
-      post_nom: secondaryName,
-      prenom: rest.length > 1 ? rest[rest.length - 1] : primaryName,
-      adresse: customer.address?.trim() || "N/A",
-      ville: customer.city?.trim() || "N/A",
-      pays: customer.country?.trim() || "N/A",
-      contact: customer.phone || customer.email,
+      nom: customer.name.trim(),
+      post_nom: null,
+      prenom: null,
+      adresse: customer.address?.trim() || null,
+      ville: customer.city?.trim() || null,
+      pays: customer.country?.trim() || null,
+      contact: customer.phone?.trim() || null,
+      email: customer.email?.trim() || null,
       iduser: null,
     }
   }

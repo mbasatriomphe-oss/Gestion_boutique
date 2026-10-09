@@ -11,6 +11,13 @@ export interface Product {
   categoryLabel?: string
   currencySymbol?: string
   stock?: number
+  basePrice?: number
+  stockUnitLabel?: string
+  saleUnits?: Array<{ id: number; label: string; factor: number; price?: number; currencyId?: number; currencySymbol?: string }>
+  saleUnitId?: number
+  saleUnitLabel?: string
+  conversionFactor?: number
+  sourceCurrencyId?: number
 }
 
 interface Discount {
@@ -21,14 +28,17 @@ interface Discount {
   minAmount?: number
 }
 
-interface Customer {
+export interface Customer {
   id: string
   name: string
-  email: string
-  phone: string
+  email?: string
+  phone?: string
+  address?: string
+  city?: string
+  country?: string
   loyaltyPoints: number
   totalSpent: number
-  purchaseHistory: Transaction[]
+  purchaseHistory?: Transaction[]
 }
 
 interface Transaction {
@@ -53,6 +63,7 @@ interface CartContextType {
   addToCart: (product: Product) => boolean
   removeFromCart: (productId: number) => void
   updateQuantity: (productId: number, quantity: number) => void
+  updateSaleUnit: (productId: number, unitId: number) => void
   clearCart: () => void
   cartTotal: number
   itemCount: number
@@ -99,13 +110,29 @@ export function CartProvider({ children }: { children: ReactNode }) {
         return prevCart
       }
 
-      if (existingItem && Number.isFinite(stockLimit) && existingItem.quantity >= stockLimit) {
+      const factor = existingItem?.conversionFactor ?? product.conversionFactor ?? 1
+      if (existingItem && Number.isFinite(stockLimit) && (existingItem.quantity + 1) * factor > stockLimit) {
         return prevCart
       }
 
       if (existingItem) {
         added = true
-        return prevCart.map((item) => (item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item))
+        return prevCart.map((item) => {
+          if (item.id !== product.id) return item
+          const saleUnitId = item.saleUnitId ?? product.saleUnitId
+          const saleUnit = product.saleUnits?.find(unit => unit.id === saleUnitId)
+          return {
+            ...item,
+            ...product,
+            quantity: item.quantity + 1,
+            saleUnitId,
+            saleUnitLabel: item.saleUnitLabel ?? product.saleUnitLabel,
+            conversionFactor: item.conversionFactor ?? product.conversionFactor,
+            price: saleUnit?.price ?? (product.basePrice ?? product.price) * (item.conversionFactor ?? product.conversionFactor ?? 1),
+            sourceCurrencyId: saleUnit?.currencyId ?? item.sourceCurrencyId ?? product.sourceCurrencyId,
+            currencySymbol: saleUnit?.currencySymbol ?? item.currencySymbol ?? product.currencySymbol,
+          }
+        })
       }
 
       added = true
@@ -125,7 +152,33 @@ export function CartProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    setCart((prevCart) => prevCart.map((item) => (item.id === productId ? { ...item, quantity } : item)))
+    setCart((prevCart) => prevCart.map((item) => {
+      if (item.id !== productId) return item
+      const factor = item.conversionFactor ?? 1
+      const maximum = Number.isFinite(item.stock) ? Math.floor((item.stock ?? 0) / factor) : quantity
+      return { ...item, quantity: Math.min(quantity, maximum) }
+    }).filter((item) => item.quantity > 0))
+  }
+
+  const updateSaleUnit = (productId: number, unitId: number) => {
+    setCart((prevCart) => prevCart.map((item) => {
+      if (item.id !== productId) return item
+      const unit = item.saleUnits?.find((option) => option.id === unitId)
+      if (!unit) return item
+      const quantity = Number.isFinite(item.stock)
+        ? Math.min(item.quantity, Math.floor((item.stock ?? 0) / unit.factor))
+        : item.quantity
+      return {
+        ...item,
+        quantity,
+        saleUnitId: unit.id,
+        saleUnitLabel: unit.label,
+        conversionFactor: unit.factor,
+        price: unit.price ?? (item.basePrice ?? item.price) * unit.factor,
+        sourceCurrencyId: unit.currencyId ?? item.sourceCurrencyId,
+        currencySymbol: unit.currencySymbol ?? item.currencySymbol,
+      }
+    }).filter((item) => item.quantity > 0))
   }
 
   const clearCart = () => {
@@ -160,6 +213,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         addToCart,
         removeFromCart,
         updateQuantity,
+        updateSaleUnit,
         clearCart,
         cartTotal,
         itemCount,

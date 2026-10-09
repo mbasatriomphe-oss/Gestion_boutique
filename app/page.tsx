@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { Filter, History, Loader2, RefreshCw, ShoppingCart, Trash2, TrendingUp } from "lucide-react"
+import { FileText, Filter, History, Loader2, Printer, RefreshCw, ShoppingCart, Trash2, TrendingUp } from "lucide-react"
 import ProductGrid from "./components/product-grid"
 import CartSidebar from "./components/cart-sidebar"
 import CategorySidebar from "./components/category-sidebar"
@@ -19,7 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet"
@@ -38,7 +38,20 @@ type BackendProduct = {
   code: string
   nom: string
   photo: string | null
+  unite_id: number
+  unite?: { symbole?: string; nom?: string }
   categorie?: BackendCategory
+  unitesVente?: BackendConfiguredUnit[]
+  unites_vente?: BackendConfiguredUnit[]
+}
+
+type BackendConfiguredUnit = {
+  id_unite: number
+  facteur: string
+  prix?: string | null
+  id_devise?: number | null
+  unite?: { symbole?: string; nom?: string }
+  devise?: { id?: number; code?: string; symbole?: string }
 }
 
 type BackendLot = {
@@ -47,6 +60,9 @@ type BackendLot = {
   ligne_approvisionnement?: {
     prix_vente?: string | null
     prix_unitaire?: string | null
+    prix_vente_stock?: string | null
+    prix_unitaire_stock?: string | null
+    facteur_conversion?: string | null
   }
   devise?: {
     code?: string
@@ -79,6 +95,8 @@ type SaleLine = {
   quantite: number
   prix_vente: string
   devise?: { id?: number; code?: string; symbole?: string }
+  produit?: { nom?: string }
+  unite?: { nom?: string; symbole?: string }
 }
 
 type Sale = {
@@ -91,8 +109,12 @@ type Sale = {
   vendeur?: SaleVendor
   client?: SaleClient
   lignes: SaleLine[]
+  montant_total?: number | string
+  montant_paye?: number | string
   reste_a_payer?: number
+  type_paiement?: "total" | "avance" | "credit" | null
   deviseVente?: { id?: number; code?: string; symbole?: string }
+  devise_vente?: { id?: number; code?: string; symbole?: string }
 }
 
 function slugify(value: string) {
@@ -132,7 +154,9 @@ function saleTotal(sale: Sale) {
   return (sale.lignes ?? []).reduce((sum, line) => sum + Number(line.quantite) * Number(line.prix_vente), 0)
 }
 
-function isCancelableSale(sale: Sale) {
+function isCancelableSale(sale: Sale, userId?: string | number, role?: string) {
+  if (role !== "admin" && Number(sale.id_vendeur) !== Number(userId)) return false
+  if (role === "admin") return true
   if (!sale.created_at) return false
 
   const elapsed = Date.now() - new Date(sale.created_at).getTime()
@@ -144,6 +168,7 @@ export default function POSPage() {
   const [selectedCategory, setSelectedCategory] = useState("all")
   const [mobileCartOpen, setMobileCartOpen] = useState(false)
   const { user, isLoading } = useAuth()
+  const authUser = user as { id?: string | number; role?: string; name?: string } | null
   const { settings } = useSettings() as { settings: POSSettings }
   const { clearCart, itemCount } = useCart()
   const router = useRouter()
@@ -157,6 +182,7 @@ export default function POSPage() {
   const [saleDate, setSaleDate] = useState(getToday())
   const [saleMonth, setSaleMonth] = useState(getToday().slice(0, 7))
   const [saleSortDirection, setSaleSortDirection] = useState<"desc" | "asc">("desc")
+  const [saleContextMenu, setSaleContextMenu] = useState<{ sale: Sale; x: number; y: number } | null>(null)
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -243,6 +269,11 @@ export default function POSPage() {
   }, [user, fetchSales])
 
   const handleCancelSale = async (sale: Sale) => {
+    if (authUser?.role !== "admin" && Number(sale.id_vendeur) !== Number(authUser?.id)) {
+      setSalesError("Vous ne pouvez annuler que vos propres ventes.")
+      return
+    }
+
     if (!confirm(`Annuler la vente ${sale.code} ?`)) {
       return
     }
@@ -253,6 +284,37 @@ export default function POSPage() {
     } catch (error) {
       setSalesError(error instanceof Error ? error.message : "Impossible d'annuler cette vente.")
     }
+  }
+
+  const openSaleReceipt = (sale: Sale, print = false) => {
+    const total = Number(sale.montant_total ?? saleTotal(sale))
+    const paid = Number(sale.montant_paye ?? Math.max(total - Number(sale.reste_a_payer ?? 0), 0))
+    const remaining = Number(sale.reste_a_payer ?? Math.max(total - paid, 0))
+    const paymentType = sale.type_paiement ?? (remaining > 0 ? (paid > 0 ? "avance" : "credit") : "total")
+    const saleCurrency = sale.deviseVente ?? sale.devise_vente
+    const symbol = saleCurrency?.symbole ?? sale.lignes[0]?.devise?.symbole ?? ""
+
+    sessionStorage.setItem("pos_pending_receipt", JSON.stringify({
+      date: sale.created_at ?? `${sale.date}T12:00:00`,
+      customer: {
+        name: [sale.client?.prenom, sale.client?.post_nom, sale.client?.nom].filter(Boolean).join(" ") || "Client comptoir",
+      },
+      currency: { code: saleCurrency?.code ?? sale.lignes[0]?.devise?.code ?? "", symbol },
+      paymentType,
+      total,
+      paid,
+      remaining,
+      discount: 0,
+      lines: sale.lignes.map((line) => ({
+        name: line.produit?.nom ?? `Produit #${line.id}`,
+        unit: line.unite?.symbole ?? line.unite?.nom ?? "",
+        quantity: Number(line.quantite),
+        unitPrice: Number(line.prix_vente),
+        total: Number(line.quantite) * Number(line.prix_vente),
+      })),
+    }))
+    setSaleContextMenu(null)
+    router.push(`/success?type=${paymentType}&amount=${paid}&remaining=${remaining}&receipt=${encodeURIComponent(sale.code || String(sale.id))}${print ? "&print=1" : ""}`)
   }
   const [showPayDialog, setShowPayDialog] = useState(false)
   const [selectedSaleToPay, setSelectedSaleToPay] = useState<Sale | null>(null)
@@ -303,7 +365,7 @@ export default function POSPage() {
         return
       }
 
-      const defaultDev = String(sale.deviseVente?.id ?? devises[0].id ?? "")
+      const defaultDev = String((sale.deviseVente ?? sale.devise_vente)?.id ?? devises[0].id ?? "")
       setRateByPair({})
       setRateInfoByPair({})
       setPaymentsToMake([{ devise_id: defaultDev, montant: String(Number(sale.reste_a_payer ?? 0).toFixed(2)) }])
@@ -322,7 +384,7 @@ export default function POSPage() {
     const loadRates = async () => {
       if (!showPayDialog || !selectedSaleToPay) return
 
-      const saleDevId = Number(selectedSaleToPay?.deviseVente?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
+      const saleDevId = Number((selectedSaleToPay?.deviseVente ?? selectedSaleToPay?.devise_vente)?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
       const neededPairs: Array<[number, number]> = []
 
       for (const p of paymentsToMake) {
@@ -379,7 +441,7 @@ export default function POSPage() {
   // When user changes payment devise, auto-convert the amount to the new currency
   const handlePaymentDeviseChange = async (idx: number, newDeviseId: string) => {
     const newPayDevId = Number(newDeviseId)
-    const saleDevId = Number(selectedSaleToPay?.deviseVente?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
+    const saleDevId = Number((selectedSaleToPay?.deviseVente ?? selectedSaleToPay?.devise_vente)?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
 
     let rate: number | undefined = rateByPair[makeRateKey(newPayDevId, saleDevId)]
 
@@ -479,19 +541,52 @@ export default function POSPage() {
         const mappedProducts: Product[] = sourceRows.map((row) => {
           const product = productById.get(row.id)
           const latestLot = latestLotByProduct.get(row.id)
-          const price = Number(latestLot?.ligne_approvisionnement?.prix_vente ?? latestLot?.ligne_approvisionnement?.prix_unitaire ?? 0)
+          const line = latestLot?.ligne_approvisionnement
+          const normalizedPrice = line?.prix_vente_stock ?? line?.prix_unitaire_stock
+          const enteredPrice = Number(line?.prix_vente ?? line?.prix_unitaire ?? 0)
+          const purchaseFactor = Number(line?.facteur_conversion ?? 1)
+          const configuredSaleUnits = product?.unitesVente ?? product?.unites_vente ?? []
+          const baseSaleUnit = configuredSaleUnits.find(unit => unit.id_unite === product?.unite_id)
+          const basePrice = Number(baseSaleUnit?.prix ?? normalizedPrice ?? (purchaseFactor > 0 ? enteredPrice / purchaseFactor : enteredPrice))
           const categoryName = product?.categorie?.nom ?? "Autres"
-          const currencySymbol = latestLot?.devise?.symbole ?? latestLot?.devise?.code ?? "$"
+          const currencySymbol = baseSaleUnit?.devise?.symbole ?? baseSaleUnit?.devise?.code ?? latestLot?.devise?.symbole ?? latestLot?.devise?.code ?? "$"
+          const sourceCurrencyId = Number(baseSaleUnit?.id_devise ?? baseSaleUnit?.devise?.id ?? 0) || undefined
+          const saleUnits = configuredSaleUnits.map((conversion) => ({
+            id: conversion.id_unite,
+            label: conversion.unite?.symbole ?? conversion.unite?.nom ?? "unité",
+            factor: Number(conversion.facteur),
+            price: conversion.prix !== null && conversion.prix !== undefined ? Number(conversion.prix) : basePrice * Number(conversion.facteur),
+            currencyId: conversion.id_devise ?? conversion.devise?.id ?? sourceCurrencyId,
+            currencySymbol: conversion.devise?.symbole ?? conversion.devise?.code ?? currencySymbol,
+          })).filter((unit) => Number.isFinite(unit.factor) && unit.factor > 0) ?? []
+          const referenceUnitLabel = product?.unite?.symbole ?? product?.unite?.nom ?? "unité"
+          if (!saleUnits.some((unit) => unit.id === product?.unite_id)) {
+            saleUnits.unshift({
+              id: product?.unite_id ?? 0,
+              label: referenceUnitLabel,
+              factor: 1,
+              price: basePrice,
+              currencyId: sourceCurrencyId,
+              currencySymbol,
+            })
+          }
 
           return {
             id: row.id,
             name: product?.nom ?? row.nom,
-            price,
+            price: basePrice,
+            basePrice,
             image: getPhotoUrl(product?.photo ?? null),
             category: slugify(categoryName) || "autres",
             categoryLabel: categoryName,
             currencySymbol,
+            sourceCurrencyId,
             stock: Number(row.stock_actuel ?? 0),
+            stockUnitLabel: referenceUnitLabel,
+            saleUnits,
+            saleUnitId: product?.unite_id,
+            saleUnitLabel: referenceUnitLabel,
+            conversionFactor: 1,
           }
         })
 
@@ -568,14 +663,46 @@ export default function POSPage() {
   }
 
   const totalSalesAmount = sales.reduce((sum, sale) => sum + saleTotal(sale), 0)
-  const cancelableSales = sales.filter((sale) => isCancelableSale(sale)).length
+  const cancelableSales = sales.filter((sale) => isCancelableSale(sale, authUser?.id, authUser?.role)).length
 
   return (
     <div className="flex min-h-screen flex-col bg-background lg:flex-row">
       <CategorySidebar selectedCategory={selectedCategory} onSelectCategory={setSelectedCategory} categories={categories} />
 
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main
+        className="relative flex min-h-0 flex-1 flex-col"
+        onClick={(event) => {
+          if (!(event.target as HTMLElement).closest(".sale-context-menu")) setSaleContextMenu(null)
+        }}
+        onContextMenu={(event) => {
+          if (!(event.target as HTMLElement).closest("tr[data-sale-row]")) setSaleContextMenu(null)
+        }}
+      >
         <Header searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
+        {saleContextMenu && (
+          <div
+            className="sale-context-menu fixed z-[100] min-w-48 rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg"
+            style={{ left: saleContextMenu.x, top: saleContextMenu.y }}
+            role="menu"
+          >
+            <Button variant="ghost" className="w-full justify-start" onClick={() => openSaleReceipt(saleContextMenu.sale)}>
+              <FileText className="mr-2 h-4 w-4" />Visualiser le reçu
+            </Button>
+            <Button variant="ghost" className="w-full justify-start" onClick={() => openSaleReceipt(saleContextMenu.sale, true)}>
+              <Printer className="mr-2 h-4 w-4" />Imprimer le reçu
+            </Button>
+            {authUser?.role === "admin" || Number(saleContextMenu.sale.id_vendeur) === Number(authUser?.id) ? (
+              <Button
+                variant="ghost"
+                className="w-full justify-start text-destructive hover:text-destructive"
+                disabled={!isCancelableSale(saleContextMenu.sale, authUser?.id, authUser?.role)}
+                onClick={() => { const sale = saleContextMenu.sale; setSaleContextMenu(null); void handleCancelSale(sale) }}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />Annuler cette vente
+              </Button>
+            ) : null}
+          </div>
+        )}
 
         <Tabs defaultValue="catalog" className="flex min-h-0 flex-1 flex-col">
           <div className="border-b bg-background/95 px-3 py-3 shadow-sm backdrop-blur sm:px-4">
@@ -709,10 +836,22 @@ export default function POSPage() {
                         </TableHeader>
                         <TableBody>
                           {sales.map((sale) => {
-                            const cancelable = isCancelableSale(sale)
+                            const cancelable = isCancelableSale(sale, authUser?.id, authUser?.role)
 
                             return (
-                              <TableRow key={sale.id}>
+                              <TableRow
+                                key={sale.id}
+                                data-sale-row
+                                className="cursor-context-menu"
+                                onContextMenu={(event) => {
+                                  event.preventDefault()
+                                  setSaleContextMenu({
+                                    sale,
+                                    x: Math.min(event.clientX, window.innerWidth - 210),
+                                    y: Math.min(event.clientY, window.innerHeight - 160),
+                                  })
+                                }}
+                              >
                                 <TableCell className="font-mono text-xs">{sale.code}</TableCell>
                                 <TableCell>{formatDateTime(sale.created_at ?? sale.date)}</TableCell>
                                 <TableCell>
@@ -724,22 +863,29 @@ export default function POSPage() {
                                     {cancelable ? "Annulable" : "Trop tard"}
                                   </Badge>
                                 </TableCell>
-                                <TableCell className="flex gap-2">
+                                <TableCell>
+                                  <div className="flex flex-wrap gap-2">
+                                    <Button variant="outline" size="sm" className="h-8" onClick={() => openSaleReceipt(sale)}>
+                                      <FileText className="mr-1 h-4 w-4" />Reçu
+                                    </Button>
                                   {Number(sale.reste_a_payer ?? 0) > 0 && (
                                     <Button variant="secondary" size="sm" className="h-8" onClick={() => void handlePayDebt(sale)}>
                                       Payer dette
                                     </Button>
                                   )}
 
-                                  <Button
-                                    variant="destructive"
-                                    size="sm"
-                                    className="h-8"
-                                    disabled={!cancelable}
-                                    onClick={() => void handleCancelSale(sale)}
-                                  >
-                                    <Trash2 className="mr-2 h-4 w-4" />Annuler
-                                  </Button>
+                                  {(authUser?.role === "admin" || Number(sale.id_vendeur) === Number(authUser?.id)) && (
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      className="h-8"
+                                      disabled={!cancelable}
+                                      onClick={() => void handleCancelSale(sale)}
+                                    >
+                                      <Trash2 className="mr-2 h-4 w-4" />Annuler
+                                    </Button>
+                                  )}
+                                  </div>
                                 </TableCell>
                               </TableRow>
                             )
@@ -749,7 +895,7 @@ export default function POSPage() {
                     )}
                   </div>
                   <p className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Filter className="h-3.5 w-3.5" />Les ventes sont automatiquement limitées à votre compte vendeur.
+                    <Filter className="h-3.5 w-3.5" />Toutes les ventes sont visibles. Vous pouvez annuler uniquement vos ventes (dans l’heure).
                   </p>
                 </CardContent>
               </Card>
@@ -760,6 +906,7 @@ export default function POSPage() {
             <DialogContent className="max-w-md">
               <DialogHeader>
                 <DialogTitle>Payer la dette — {selectedSaleToPay?.code ?? ''}</DialogTitle>
+                <DialogDescription className="sr-only">Enregistre un ou plusieurs paiements pour solder cette vente.</DialogDescription>
               </DialogHeader>
               <form onSubmit={async (e) => {
                 e.preventDefault()
@@ -799,7 +946,7 @@ export default function POSPage() {
                         <p className="text-xs text-muted-foreground mt-1">
                           {
                             (() => {
-                              const saleDevId = Number(selectedSaleToPay?.deviseVente?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
+                              const saleDevId = Number((selectedSaleToPay?.deviseVente ?? selectedSaleToPay?.devise_vente)?.id ?? selectedSaleToPay?.lignes?.[0]?.devise?.id ?? 0)
                               const payDevId = Number(p.devise_id)
                               const key = makeRateKey(payDevId, saleDevId)
                               const rate = rateByPair[key]
@@ -810,7 +957,7 @@ export default function POSPage() {
 
                               const amt = Number(p.montant) || 0
                               const converted = (amt * rate)
-                              return `${converted.toFixed(2)} ${selectedSaleToPay?.deviseVente?.symbole ?? ''}${info ? ' — ' + info : ''}`
+                              return `${converted.toFixed(2)} ${(selectedSaleToPay?.deviseVente ?? selectedSaleToPay?.devise_vente)?.symbole ?? ''}${info ? ' — ' + info : ''}`
                             })()
                           }
                         </p>

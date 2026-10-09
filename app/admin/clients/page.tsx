@@ -21,18 +21,19 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 interface Client {
   id: number
   nom: string
-  post_nom: string
-  prenom: string
-  adresse: string
-  ville: string
-  pays: string
-  contact: string
+  post_nom?: string | null
+  prenom?: string | null
+  adresse?: string | null
+  ville?: string | null
+  pays?: string | null
+  contact?: string | null
+  email?: string | null
   ventes_count: number
 }
 
 const EMPTY_FORM = {
-  nom: "", post_nom: "", prenom: "",
-  adresse: "", ville: "", pays: "Congo (RDC)", contact: "",
+  nom: "", adresse: "", contact: "", email: "",
+  ville: "", pays: "", post_nom: "", prenom: "",
 }
 
 export default function ClientsPage() {
@@ -77,8 +78,9 @@ export default function ClientsPage() {
   const openEdit = (client: Client) => {
     setEditing(client)
     setFormData({
-      nom: client.nom, post_nom: client.post_nom, prenom: client.prenom,
-      adresse: client.adresse, ville: client.ville, pays: client.pays, contact: client.contact,
+      nom: client.nom, post_nom: client.post_nom ?? "", prenom: client.prenom ?? "",
+      adresse: client.adresse ?? "", ville: client.ville ?? "", pays: client.pays ?? "",
+      contact: client.contact ?? "", email: client.email ?? "",
     })
     setFormError("")
     setShowDialog(true)
@@ -86,9 +88,8 @@ export default function ClientsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const required = ["nom", "post_nom", "prenom", "adresse", "ville", "pays", "contact"] as const
-    if (required.some(k => !formData[k]?.trim())) {
-      setFormError("Tous les champs obligatoires doivent être remplis.")
+    if (!formData.nom.trim()) {
+      setFormError("Le nom du client est obligatoire.")
       return
     }
     setIsSaving(true)
@@ -110,7 +111,7 @@ export default function ClientsPage() {
   }
 
   const handleDelete = async (client: Client) => {
-    if (!confirm(`Supprimer ${client.prenom} ${client.nom} ?`)) return
+    if (!confirm(`Supprimer ${[client.nom, client.post_nom, client.prenom].filter(Boolean).join(" ")} ?`)) return
     try {
       await backendRequest(`/clients/${client.id}`, { method: "DELETE" })
       setClients(prev => prev.filter(c => c.id !== client.id))
@@ -200,19 +201,19 @@ export default function ClientsPage() {
                         <div className="flex items-center gap-3">
                           <Avatar className="h-9 w-9">
                             <AvatarFallback className="bg-blue-100 text-blue-700 font-semibold text-xs">
-                              {client.prenom[0]}{client.nom[0]}
+                              {client.prenom?.[0] ?? ""}{client.nom[0]}
                             </AvatarFallback>
                           </Avatar>
                           <div>
-                            <p className="font-medium">{client.prenom} {client.post_nom} {client.nom}</p>
-                            <p className="text-xs text-muted-foreground">{client.adresse}</p>
+                            <p className="font-medium">{[client.nom, client.post_nom, client.prenom].filter(Boolean).join(" ")}</p>
+                            <p className="text-xs text-muted-foreground">{client.adresse || "—"}</p>
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell>{client.contact}</TableCell>
+                      <TableCell>{client.contact || client.email || "—"}</TableCell>
                       <TableCell>
-                        <p>{client.ville}</p>
-                        <p className="text-xs text-muted-foreground">{client.pays}</p>
+                        <p>{client.ville || "—"}</p>
+                        <p className="text-xs text-muted-foreground">{client.pays || "—"}</p>
                       </TableCell>
                       <TableCell><Badge variant="secondary">{client.ventes_count || 0}</Badge></TableCell>
                       <TableCell>
@@ -241,30 +242,40 @@ export default function ClientsPage() {
             <DialogTitle>{editing ? "Modifier le client" : "Nouveau client"}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-3">
-              {(["prenom", "post_nom", "nom"] as const).map(field => (
-                <div key={field} className="space-y-1">
-                  <Label htmlFor={field}>{field === "prenom" ? "Prénom *" : field === "post_nom" ? "Post-nom *" : "Nom *"}</Label>
-                  <Input id={field} value={formData[field]} onChange={e => setFormData(p => ({ ...p, [field]: e.target.value }))} />
-                </div>
-              ))}
+            <div className="space-y-1">
+              <Label htmlFor="nom">Nom *</Label>
+              <Input id="nom" value={formData.nom} onChange={e => setFormData(p => ({ ...p, nom: e.target.value }))} required />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="contact">Contact *</Label>
+              <Label htmlFor="adresse">Adresse</Label>
+              <Input id="adresse" value={formData.adresse} onChange={e => setFormData(p => ({ ...p, adresse: e.target.value }))} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="contact">Numéro de téléphone</Label>
               <Input id="contact" value={formData.contact} onChange={e => setFormData(p => ({ ...p, contact: e.target.value }))} placeholder="+243..." />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="adresse">Adresse *</Label>
-              <Input id="adresse" value={formData.adresse} onChange={e => setFormData(p => ({ ...p, adresse: e.target.value }))} />
+              <Label htmlFor="email">Adresse e-mail</Label>
+              <Input id="email" type="email" value={formData.email} onChange={e => setFormData(p => ({ ...p, email: e.target.value }))} />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1">
-                <Label htmlFor="ville">Ville *</Label>
+                <Label htmlFor="ville">Ville</Label>
                 <Input id="ville" value={formData.ville} onChange={e => setFormData(p => ({ ...p, ville: e.target.value }))} />
               </div>
               <div className="space-y-1">
-                <Label htmlFor="pays">Pays *</Label>
+                <Label htmlFor="pays">Pays</Label>
                 <Input id="pays" value={formData.pays} onChange={e => setFormData(p => ({ ...p, pays: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="post_nom">Post-nom</Label>
+                <Input id="post_nom" value={formData.post_nom} onChange={e => setFormData(p => ({ ...p, post_nom: e.target.value }))} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="prenom">Prénom</Label>
+                <Input id="prenom" value={formData.prenom} onChange={e => setFormData(p => ({ ...p, prenom: e.target.value }))} />
               </div>
             </div>
             {formError && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{formError}</AlertDescription></Alert>}

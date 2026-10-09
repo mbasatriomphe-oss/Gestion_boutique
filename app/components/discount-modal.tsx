@@ -5,7 +5,7 @@ import { Percent, DollarSign } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Card, CardContent } from "@/components/ui/card"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { useCart } from "../context/cart-context"
@@ -98,6 +98,7 @@ export default function DiscountModal({ isOpen, onClose }: DiscountModalProps) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Appliquer une remise</DialogTitle>
+          <DialogDescription className="sr-only">Choisis une remise prédéfinie ou saisis une remise personnalisée pour le panier.</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">

@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import {
@@ -25,6 +26,7 @@ import {
   Download,
   Printer,
   Package,
+  Boxes,
   AlertTriangle,
   TrendingUp,
   TrendingDown,
@@ -35,6 +37,14 @@ import {
   BarChart3,
   History,
   FileText,
+  Eye,
+  EyeOff,
+  ChevronLeft,
+  ChevronRight,
+  ShoppingCart,
+  Warehouse,
+  ArrowLeft,
+  Search,
 } from "lucide-react"
 import { backendRequest, getBackendBaseUrl, getStoredToken } from "@/app/services/backend"
 
@@ -133,6 +143,33 @@ function getRelation(source, relationName) {
   return source?.[relationName] ?? source?.[relationName.replace(/([A-Z])/g, "_$1").toLowerCase()]
 }
 
+function getProductCountUnits(product) {
+  const unitsById = new Map()
+  const purchaseUnits = getRelation(product, "unitesAchat") ?? []
+  const saleUnits = getRelation(product, "unitesVente") ?? []
+
+  for (const unit of [...purchaseUnits, ...saleUnits]) {
+    const unitId = Number(unit.id_unite)
+    if (!Number.isFinite(unitId) || unitsById.has(unitId)) continue
+    unitsById.set(unitId, {
+      id: unitId,
+      label: unit.unite?.nom ?? unit.unite?.symbole ?? `Unité ${unitId}`,
+      factor: safeNumber(unit.facteur, unitId === Number(product.unite_id) ? 1 : 0),
+    })
+  }
+
+  const baseUnitId = Number(product.unite_id)
+  if (Number.isFinite(baseUnitId) && !unitsById.has(baseUnitId)) {
+    unitsById.set(baseUnitId, {
+      id: baseUnitId,
+      label: getRelation(product, "unite")?.nom ?? getRelation(product, "unite")?.symbole ?? "Unité de base",
+      factor: 1,
+    })
+  }
+
+  return Array.from(unitsById.values()).filter(unit => unit.factor > 0)
+}
+
 function makeRateKey(sourceCurrencyId, targetCurrencyId) {
   return `${sourceCurrencyId}:${targetCurrencyId}`
 }
@@ -194,8 +231,16 @@ function buildInventoryData(products, stocks, lots) {
     const latestCurrency = getRelation(latestLot, "devise")
     const currentStock = safeNumber(stockRow?.stock_actuel)
     const totalReceived = productLots.reduce((sum, lot) => sum + safeNumber(lot.quantite_initial), 0)
-    const costPrice = safeNumber(latestLine?.prix_unitaire, totalReceived > 0 ? totalReceived / Math.max(productLots.length, 1) : 0)
-    const retailPrice = safeNumber(latestLine?.prix_vente, costPrice)
+    const purchaseFactor = safeNumber(latestLine?.facteur_conversion, 1)
+    const configuredPurchaseUnit = getRelation(product, "unitesAchat")?.[0] ?? getRelation(product, "unites_achat")?.[0]
+    const configuredSaleUnits = getRelation(product, "unitesVente") ?? getRelation(product, "unites_vente") ?? []
+    const configuredBaseSaleUnit = configuredSaleUnits.find((unit) => Number(unit.id_unite) === Number(product.unite_id))
+    const configuredCostPrice = configuredPurchaseUnit?.prix == null ? null : safeNumber(configuredPurchaseUnit.prix) / Math.max(safeNumber(configuredPurchaseUnit.facteur, 1), 0.00000001)
+    const legacyCostPrice = totalReceived > 0 ? totalReceived / Math.max(productLots.length, 1) : 0
+    const openingLotCost = latestLot?.prix_unitaire_stock
+    const costPrice = safeNumber(latestLine?.prix_unitaire_stock, safeNumber(openingLotCost, safeNumber(latestLine?.prix_unitaire, configuredCostPrice ?? legacyCostPrice) / purchaseFactor))
+    const retailPrice = safeNumber(configuredBaseSaleUnit?.prix, safeNumber(latestLine?.prix_vente_stock, safeNumber(latestLine?.prix_vente, costPrice * purchaseFactor) / purchaseFactor))
+    const alertThreshold = safeNumber(product.seuil_alerte, safeNumber(product.stock_min ?? product.minStock))
     const minStock = Math.max(5, Math.min(20, Math.round(totalReceived * 0.1) || 5))
     const maxStock = Math.max(currentStock + minStock, totalReceived || currentStock + 20)
     const restocksLast30Days = productLots.filter((lot) => {
@@ -213,7 +258,7 @@ function buildInventoryData(products, stocks, lots) {
       sourceCurrencyCode: latestCurrency?.code ?? latestLot?.devise?.code ?? "",
       sourceCurrencySymbol: getCurrencyLabel(latestCurrency, latestLot?.devise?.symbole ?? ""),
       currentStock,
-      minStock,
+      minStock: product.seuil_alerte == null ? minStock : alertThreshold,
       maxStock,
       costPrice,
       price: retailPrice,
@@ -230,24 +275,44 @@ function buildInventoryData(products, stocks, lots) {
   })
 }
 
+function formatStockQuantity(product) {
+  const stock = safeNumber(product.currentStock)
+  const purchaseUnit = getRelation(product, "unitesAchat")?.[0] ?? getRelation(product, "unites_achat")?.[0]
+  const factor = safeNumber(purchaseUnit?.facteur, 1)
+  const purchaseLabel = getRelation(purchaseUnit, "unite")?.symbole || getRelation(purchaseUnit, "unite")?.nom
+  const stockLabel = product.unitLabel || "unité"
+
+  if (!purchaseLabel || factor <= 1) {
+    return `${stock.toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${stockLabel}`
+  }
+
+  const packages = Math.floor((stock + 0.00000001) / factor)
+  const remainder = Number((stock - packages * factor).toFixed(8))
+  const parts = [`${packages} ${packages === 1 ? purchaseLabel : `${purchaseLabel}s`}`]
+  if (remainder > 0) parts.push(`${remainder.toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${stockLabel}`)
+  return parts.join(" + ")
+}
+
 function buildRestockHistory(lots) {
   const grouped = new Map()
 
   lots.forEach((lot) => {
     const approvisionnement = getRelation(lot, "approvisionnement")
     const fournisseur = approvisionnement?.fournisseur
-    const lotCost = safeNumber(getRelation(lot, "ligneApprovisionnement")?.prix_unitaire)
-    const quantity = safeNumber(lot.quantite_initial)
+    const procurementLine = getRelation(lot, "ligneApprovisionnement")
+    const lotCost = safeNumber(procurementLine?.prix_unitaire, safeNumber(lot.prix_unitaire_stock))
+    const quantity = safeNumber(procurementLine?.quantite, safeNumber(lot.quantite_initial))
+    const unitLabel = getRelation(procurementLine, "unite")?.symbole || getRelation(lot, "produit")?.unite?.symbole || ""
     const groupKey = approvisionnement?.id ?? lot.id
 
     if (!grouped.has(groupKey)) {
       grouped.set(groupKey, {
-        id: approvisionnement?.code || lot.numero_lot || `RS-${lot.id}`,
+        id: approvisionnement?.code || (lot.numero_lot?.startsWith("INIT-") ? "Stock initial" : lot.numero_lot) || `RS-${lot.id}`,
         date: formatDate(lot.date_reception),
         products: [],
         totalCost: 0,
-        supplier: fournisseur?.nom || "—",
-        status: "terminé",
+        supplier: fournisseur?.nom || (lot.numero_lot?.startsWith("INIT-") ? "Ouverture du stock" : "—"),
+        status: lot.numero_lot?.startsWith("INIT-") ? "stock initial" : "terminé",
         processedBy: approvisionnement?.user ? `${approvisionnement.user.nom ?? ""} ${approvisionnement.user.prenom ?? ""}`.trim() || "Système" : "Système",
         sourceCurrencyId: getRelation(lot, "devise")?.id ?? lot.id_devise ?? null,
         sourceCurrencySymbol: getCurrencyLabel(getRelation(lot, "devise"), ""),
@@ -259,6 +324,7 @@ function buildRestockHistory(lots) {
       name: getRelation(lot, "produit")?.nom || "Produit",
       sku: getRelation(lot, "produit")?.code || lot.numero_lot || `LOT-${lot.id}`,
       quantity,
+      unitLabel,
       cost: lotCost,
       sourceCurrencyId: getRelation(lot, "devise")?.id ?? lot.id_devise ?? null,
     })
@@ -269,7 +335,21 @@ function buildRestockHistory(lots) {
 }
 
 export default function StockReportsPage() {
+  const [mainView, setMainView] = useState("inventory")
+  const [inventoryStep, setInventoryStep] = useState("intro")
+  const [inventoryIndex, setInventoryIndex] = useState(0)
+  const [inventoryCounts, setInventoryCounts] = useState({})
+  const [skippedInventoryProducts, setSkippedInventoryProducts] = useState([])
+  const [inventorySaveError, setInventorySaveError] = useState("")
+  const [isSavingInventory, setIsSavingInventory] = useState(false)
+  const [inventorySearch, setInventorySearch] = useState("")
+  const [inventoryFilter, setInventoryFilter] = useState("active")
+  const [historySearch, setHistorySearch] = useState("")
+  const [showValues, setShowValues] = useState(true)
+  const [detailsPeriod, setDetailsPeriod] = useState("30")
+  const [salesInPeriod, setSalesInPeriod] = useState([])
   const [stockData, setStockData] = useState([])
+  const [stockMovements, setStockMovements] = useState([])
   const [restockHistory, setRestockHistory] = useState([])
   const [currencyOptions, setCurrencyOptions] = useState([])
   const [selectedCurrencyId, setSelectedCurrencyId] = useState(null)
@@ -290,6 +370,24 @@ export default function StockReportsPage() {
   const [fifoError, setFifoError] = useState(null)
 
   useEffect(() => {
+    const endDate = new Date()
+    const startDate = new Date(endDate)
+    if (detailsPeriod === "month") {
+      startDate.setDate(1)
+    } else if (detailsPeriod === "year") {
+      startDate.setMonth(0, 1)
+    } else {
+      startDate.setDate(startDate.getDate() - Number(detailsPeriod) + 1)
+    }
+    const toDateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+    const params = new URLSearchParams({ per_page: "all", date_debut: toDateKey(startDate), date_fin: toDateKey(endDate) })
+
+    backendRequest(`/ventes?${params.toString()}`)
+      .then(response => setSalesInPeriod(normalizeRows(response)))
+      .catch(() => setSalesInPeriod([]))
+  }, [detailsPeriod])
+
+  useEffect(() => {
     let cancelled = false
 
     const loadStockReports = async () => {
@@ -297,11 +395,12 @@ export default function StockReportsPage() {
       setError(null)
 
       try {
-        const [productsResponse, stocksResponse, lotsResponse, devisesResponse] = await Promise.all([
+        const [productsResponse, stocksResponse, lotsResponse, devisesResponse, movementsResponse] = await Promise.all([
           backendRequest("/produits?per_page=all"),
           backendRequest("/stocks/disponible"),
           backendRequest("/lots?per_page=all"),
           backendRequest("/devises?per_page=0"),
+          backendRequest("/mouvements-stock-fifos?per_page=all").catch(() => ({ data: [] })),
         ])
 
         const products = normalizeRows(productsResponse)
@@ -317,6 +416,7 @@ export default function StockReportsPage() {
 
         if (!cancelled) {
           setStockData(inventory)
+          setStockMovements(normalizeRows(movementsResponse))
           setRestockHistory(buildRestockHistory(lots))
           setCurrencyOptions(devises)
           setSelectedCurrencyId((current) => current ?? devises[0]?.id ?? null)
@@ -404,11 +504,10 @@ export default function StockReportsPage() {
         const nextRates = {}
         const response = await backendRequest(`/taux/actif`)
         const rates = normalizeRows(response)
-        const sourceCurrencyIds = new Set(
-          stockData
-            .map((product) => Number(product.sourceCurrencyId))
-            .filter((currencyId) => Number.isFinite(currencyId) && currencyId > 0),
-        )
+        const sourceCurrencyIds = new Set([
+          ...stockData.map((product) => Number(product.sourceCurrencyId)),
+          ...salesInPeriod.map((sale) => Number(sale.devise_vente_id ?? sale.deviseVente?.id)),
+        ].filter((currencyId) => Number.isFinite(currencyId) && currencyId > 0))
 
         rates.forEach((rate) => {
           const sourceCurrencyId = Number(rate.devise_source)
@@ -443,7 +542,7 @@ export default function StockReportsPage() {
     return () => {
       cancelled = true
     }
-  }, [selectedCurrencyId, stockData])
+  }, [selectedCurrencyId, stockData, salesInPeriod])
 
   const selectedCurrency = useMemo(
     () => currencyOptions.find((currency) => Number(currency.id) === Number(selectedCurrencyId)) ?? null,
@@ -661,8 +760,557 @@ export default function StockReportsPage() {
     document.body.removeChild(link)
   }
 
+  const formatVisibleMoney = (value) => showValues
+    ? `${selectedCurrencySymbol} ${safeNumber(value).toLocaleString("fr-FR", { maximumFractionDigits: 1 })}`
+    : "••••••"
+
+  const inventoryRows = useMemo(() => {
+    const query = inventorySearch.trim().toLocaleLowerCase("fr")
+    return valuedStockData
+      .filter(product => {
+        if (query && !`${product.name} ${product.sku} ${product.category}`.toLocaleLowerCase("fr").includes(query)) return false
+        if (inventoryFilter === "active" && product.currentStock <= 0) return false
+        if (inventoryFilter === "low" && product.currentStock > product.minStock) return false
+        return true
+      })
+      .sort((left, right) => left.name.localeCompare(right.name, "fr"))
+  }, [valuedStockData, inventorySearch, inventoryFilter])
+
+  const historyRows = useMemo(() => {
+    const query = historySearch.trim().toLocaleLowerCase("fr")
+    const productsById = new Map(stockData.map(product => [Number(product.id), product]))
+    const lotsById = new Map()
+    stockData.forEach(product => (product.lots ?? []).forEach(lot => lotsById.set(Number(lot.id), { ...lot, product })))
+
+    return stockMovements.map(movement => {
+      const lot = lotsById.get(Number(movement.id_lot))
+      const product = lot?.product ?? productsById.get(Number(lot?.id_produit))
+      const purchaseLine = getRelation(lot, "ligneApprovisionnement")
+      const procurement = getRelation(lot, "approvisionnement")
+      const openingStock = String(lot?.numero_lot ?? "").startsWith("INIT-")
+      const isReceipt = movement.type_mouvement === "entree"
+      const isReturn = movement.type_mouvement === "retour"
+      const quantity = isReceipt && purchaseLine ? safeNumber(purchaseLine.quantite, movement.quantite) : safeNumber(movement.quantite)
+      const unitLabel = isReceipt && purchaseLine
+        ? getRelation(purchaseLine, "unite")?.symbole || getRelation(purchaseLine, "unite")?.nom || product?.unitLabel
+        : product?.unitLabel
+      const description = openingStock
+        ? `Produit créé · stock ${quantity} ${unitLabel ?? ""}`
+        : isReceipt
+          ? `Reçu +${quantity} ${unitLabel ?? ""}`
+          : isReturn
+            ? `Retour +${quantity} ${unitLabel ?? ""}`
+            : `Vente −${quantity} ${unitLabel ?? ""}`
+
+      return {
+        id: movement.id,
+        name: product?.name ?? `Produit #${lot?.id_produit ?? "?"}`,
+        sku: product?.sku ?? lot?.numero_lot ?? "",
+        description,
+        date: formatDate(movement.date_mouvement),
+        processedBy: procurement?.user ? `${procurement.user.nom ?? ""} ${procurement.user.prenom ?? ""}`.trim() || "Système" : "Système",
+        type: openingStock ? "initial" : movement.type_mouvement,
+      }
+    })
+      .filter(row => !query || `${row.name} ${row.sku} ${row.processedBy} ${row.description}`.toLocaleLowerCase("fr").includes(query))
+      .sort((left, right) => right.date.localeCompare(left.date) || Number(right.id) - Number(left.id))
+  }, [stockMovements, stockData, historySearch])
+
+  const detailValues = useMemo(() => {
+    const rangeEnd = new Date()
+    const rangeStart = new Date(rangeEnd)
+    if (detailsPeriod === "month") rangeStart.setDate(1)
+    else if (detailsPeriod === "year") rangeStart.setMonth(0, 1)
+    else rangeStart.setDate(rangeStart.getDate() - Number(detailsPeriod) + 1)
+    const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+    const startKey = dateKey(rangeStart)
+    const endKey = dateKey(rangeEnd)
+    let salesRevenue = 0
+    let missingSalesRates = 0
+    const productsBySales = new Map()
+
+    salesInPeriod.forEach(sale => {
+      ;(sale.lignes ?? []).forEach(line => {
+        const quantity = safeNumber(line.quantite)
+        const price = safeNumber(line.prix_vente)
+        const sourceCurrencyId = Number(line.id_devise ?? line.devise?.id ?? sale.devise_vente_id ?? sale.deviseVente?.id) || null
+        const rate = resolveRate(rateByPair, sourceCurrencyId, selectedCurrencyId)
+        if (rate === null) {
+          missingSalesRates += 1
+          return
+        }
+
+        const lineTotal = quantity * price * rate
+        salesRevenue += lineTotal
+        const productId = Number(line.id_produit ?? line.produit?.id)
+        const productName = line.produit?.nom ?? `Produit #${productId}`
+        const current = productsBySales.get(productId) ?? { id: productId, name: productName, quantity: 0, revenue: 0 }
+        current.quantity += quantity * safeNumber(line.facteur_conversion, 1)
+        current.revenue += lineTotal
+        productsBySales.set(productId, current)
+      })
+    })
+
+    const purchases = valuedRestockHistory
+      .filter(entry => entry.status !== "stock initial" && entry.date >= startKey && entry.date <= endKey)
+      .reduce((sum, entry) => sum + safeNumber(entry.displayTotalCost), 0)
+    const currentCost = valuedStockData.reduce((sum, product) => sum + safeNumber(product.displayTotalValue), 0)
+    const currentRetail = valuedStockData.reduce((sum, product) => sum + safeNumber(product.displayRetailValue), 0)
+    const topProducts = Array.from(productsBySales.values()).sort((left, right) => right.revenue - left.revenue).slice(0, 3)
+
+    return {
+      salesRevenue,
+      purchases,
+      periodDifference: salesRevenue - purchases,
+      currentCost,
+      currentRetail,
+      currentPotentialProfit: currentRetail - currentCost,
+      productCount: valuedStockData.length,
+      outOfStock: valuedStockData.filter(product => product.currentStock <= 0).length,
+      lowStock: valuedStockData.filter(product => product.currentStock > 0 && product.currentStock <= product.minStock).length,
+      noPurchasePrice: valuedStockData.filter(product => product.costPrice <= 0).length,
+      topProducts,
+      missingSalesRates,
+    }
+  }, [detailsPeriod, salesInPeriod, rateByPair, selectedCurrencyId, valuedRestockHistory, valuedStockData])
+
+  const countProducts = stockData
+  const countProduct = countProducts[inventoryIndex] ?? null
+  const countProductFormats = countProduct ? getProductCountUnits(countProduct) : []
+  const countProductValues = countProduct ? inventoryCounts[countProduct.id] ?? {} : {}
+  const countProductTotal = countProductFormats.reduce((sum, format) => sum + safeNumber(countProductValues[format.id]) * format.factor, 0)
+  const countProductHasValues = Object.keys(countProductValues).length > 0
+  const inventorySummary = useMemo(() => countProducts.map(product => {
+    const formats = getProductCountUnits(product)
+    const quantities = inventoryCounts[product.id] ?? {}
+    const hasCounted = Object.keys(quantities).length > 0 && !skippedInventoryProducts.includes(product.id)
+    const actual = formats.reduce((sum, format) => sum + safeNumber(quantities[format.id]) * format.factor, 0)
+    const variance = actual - safeNumber(product.currentStock)
+    return { product, hasCounted, actual, variance }
+  }), [countProducts, inventoryCounts, skippedInventoryProducts])
+  const countedInventorySummary = inventorySummary.filter(item => item.hasCounted)
+  const inventoryDiscrepancyCount = countedInventorySummary.filter(item => Math.abs(item.variance) > 0.00000001).length
+  const inventorySkippedCount = countProducts.length - countedInventorySummary.length
+
+  const startInventoryCount = () => {
+    setInventoryCounts({})
+    setSkippedInventoryProducts([])
+    setInventoryIndex(0)
+    setInventorySaveError("")
+    setInventoryStep("count")
+    setMainView("counting")
+  }
+
+  const goToNextCountProduct = () => {
+    if (!countProduct) return
+    if (!countProductHasValues) {
+      setInventorySaveError("Saisis les quantités comptées ou choisis « Passer ».")
+      return
+    }
+    setInventorySaveError("")
+    if (inventoryIndex + 1 >= countProducts.length) setInventoryStep("summary")
+    else setInventoryIndex(index => index + 1)
+  }
+
+  const skipCountProduct = () => {
+    if (!countProduct) return
+    setSkippedInventoryProducts(current => current.includes(countProduct.id) ? current : [...current, countProduct.id])
+    setInventorySaveError("")
+    if (inventoryIndex + 1 >= countProducts.length) setInventoryStep("summary")
+    else setInventoryIndex(index => index + 1)
+  }
+
+  const saveInventoryCount = async () => {
+    const lines = countedInventorySummary.map(({ product }) => ({
+      id_produit: Number(product.id),
+      formats: getProductCountUnits(product).map(format => ({
+        id_unite: format.id,
+        quantite: safeNumber(inventoryCounts[product.id]?.[format.id]),
+      })),
+    }))
+
+    if (lines.length === 0) {
+      setInventorySaveError("Compte au moins un produit avant de sauvegarder l'inventaire.")
+      return
+    }
+
+    setIsSavingInventory(true)
+    setInventorySaveError("")
+    try {
+      await backendRequest("/stocks/inventaire", {
+        method: "POST",
+        body: JSON.stringify({ lignes: lines }),
+      })
+
+      const [productsResponse, stocksResponse, lotsResponse] = await Promise.all([
+        backendRequest("/produits?per_page=all"),
+        backendRequest("/stocks/disponible"),
+        backendRequest("/lots?per_page=all"),
+      ])
+      const products = normalizeRows(productsResponse)
+      const stocks = normalizeRows(stocksResponse)
+      const lots = normalizeRows(lotsResponse)
+      const productIndex = new Map(products.map(product => [Number(product.id), product]))
+      const sourceRows = (stocks.length > 0 ? stocks : products).map(row => ({ ...productIndex.get(Number(row.id)), ...row }))
+      setStockData(buildInventoryData(sourceRows, stocks, lots))
+      setRestockHistory(buildRestockHistory(lots))
+      setInventoryCounts({})
+      setSkippedInventoryProducts([])
+      setInventoryStep("intro")
+      setMainView("inventory")
+    } catch (error) {
+      setInventorySaveError(error instanceof Error ? error.message : "Impossible de sauvegarder l'inventaire.")
+    } finally {
+      setIsSavingInventory(false)
+    }
+  }
+
+  if (mainView === "inventory") {
+    return (
+      <main className="mx-auto min-h-screen w-full max-w-5xl space-y-5 px-4 py-5 pb-10 sm:px-6">
+        <header>
+          <h1 className="text-2xl font-bold">Stock</h1>
+          <p className="text-sm text-muted-foreground">{detailValues.productCount} produits · {detailValues.lowStock} alerte(s)</p>
+        </header>
+
+        <section className="relative overflow-hidden rounded-2xl bg-indigo-600 px-5 py-5 text-white sm:px-7 sm:py-6">
+          <div className="absolute -right-10 -top-16 h-56 w-56 rounded-full bg-white/10" />
+          <div className="relative flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-100">Valeur du stock</p>
+              <p className="mt-2 text-3xl font-bold sm:text-4xl">{formatVisibleMoney(detailValues.currentRetail)}</p>
+              <p className="mt-2 text-sm text-indigo-100">{detailValues.productCount} produits · {detailValues.lowStock} alerte(s)</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="ghost" size="icon" className="text-white hover:bg-white/15 hover:text-white" aria-label={showValues ? "Masquer les montants" : "Afficher les montants"} title={showValues ? "Masquer les montants" : "Afficher les montants"} onClick={() => setShowValues(value => !value)}>
+                {showValues ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
+              </Button>
+              <Button type="button" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={() => setMainView("details")}>
+                Détails <ChevronRight className="ml-1 h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        <nav className="grid grid-cols-3 gap-2" aria-label="Vues du stock">
+          <Button type="button" variant="secondary" className="h-16 flex-col gap-1 bg-amber-50 text-amber-700 hover:bg-amber-100" onClick={startInventoryCount}>
+            <Package className="h-5 w-5" />Inventaire
+          </Button>
+          <Button asChild variant="secondary" className="h-16 flex-col gap-1">
+            <Link href="/admin/approvisionnements"><Warehouse className="h-5 w-5" />Recevoir</Link>
+          </Button>
+          <Button type="button" variant="secondary" className="h-16 flex-col gap-1" onClick={() => setMainView("history")}>
+            <History className="h-5 w-5" />Historique
+          </Button>
+        </nav>
+
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Filtrer par niveau de stock">
+          <Button type="button" size="sm" variant={inventoryFilter === "active" ? "default" : "outline"} onClick={() => setInventoryFilter("active")}>Actifs <span className="ml-1">{valuedStockData.filter(product => product.currentStock > 0).length}</span></Button>
+          <Button type="button" size="sm" variant={inventoryFilter === "low" ? "default" : "outline"} onClick={() => setInventoryFilter("low")}>Stock bas <span className="ml-1">{detailValues.lowStock}</span></Button>
+          <Button type="button" size="sm" variant={inventoryFilter === "all" ? "default" : "outline"} onClick={() => setInventoryFilter("all")}>Tous <span className="ml-1">{valuedStockData.length}</span></Button>
+        </div>
+
+        <div className="flex gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <input className="h-11 w-full rounded-xl border bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="Chercher un produit..." value={inventorySearch} onChange={event => setInventorySearch(event.target.value)} />
+          </div>
+          <Button type="button" variant="outline" size="icon" aria-label="Trier les produits" title="Trier les produits" onClick={() => setSortOrder(order => order === "asc" ? "desc" : "asc")}>
+            <ArrowUpDown className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <section className="space-y-3" aria-label="Produits en stock">
+          {loading ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Chargement du stock...</div>
+          ) : inventoryRows.length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Aucun produit dans cette vue.</div>
+          ) : inventoryRows.map(product => (
+            <button key={product.id} type="button" onClick={() => { setSelectedProduct(product.id); setMainView("details") }} className="flex w-full items-center gap-3 rounded-2xl border bg-background p-3 text-left shadow-sm transition-colors hover:bg-muted/40 sm:p-4">
+              <img src={product.image} alt="" className="h-14 w-14 shrink-0 rounded-full bg-muted object-cover" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-semibold">{product.name}</span>
+                <span className="block text-sm text-muted-foreground">{formatVisibleMoney(product.displayPrice)} / {product.unitLabel || "unité"}</span>
+                {product.currentStock > 0 && product.currentStock <= product.minStock && <span className="mt-1 block text-xs font-medium text-amber-600">Stock bas</span>}
+              </span>
+              <span className="shrink-0 text-right font-semibold">{formatStockQuantity(product)}</span>
+            </button>
+          ))}
+        </section>
+      </main>
+    )
+  }
+
+  if (mainView === "counting") {
+    if (inventoryStep === "intro") {
+      return (
+        <main className="mx-auto flex min-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col px-4 py-5 sm:px-6">
+          <header className="flex items-center gap-3">
+            <Button type="button" variant="outline" size="icon" aria-label="Retour au stock" onClick={() => setMainView("inventory")}><ArrowLeft className="h-4 w-4" /></Button>
+            <h1 className="text-xl font-bold">Inventaire</h1>
+          </header>
+          <section className="mt-10 rounded-3xl border bg-background px-6 py-9 text-center shadow-sm">
+            <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-amber-50 text-amber-600"><Package className="h-9 w-9" /></span>
+            <h2 className="mt-5 text-2xl font-semibold">Compter mon stock</h2>
+            <p className="mx-auto mt-3 max-w-md text-muted-foreground">Compte les produits un par un et saisis les quantités réellement présentes pour chaque format.</p>
+            <div className="mx-auto mt-6 inline-flex items-center gap-2 rounded-full bg-amber-50 px-5 py-3 font-semibold text-amber-700">
+              <span className="text-2xl">{countProducts.length}</span> produits à compter
+            </div>
+          </section>
+          <div className="mt-auto border-t bg-background py-4">
+            <Button type="button" className="h-14 w-full bg-amber-500 text-base hover:bg-amber-600" onClick={() => { setInventoryIndex(0); setInventoryStep(countProducts.length ? "count" : "summary") }}>
+              Commencer le comptage <ChevronRight className="ml-2 h-5 w-5" />
+            </Button>
+          </div>
+        </main>
+      )
+    }
+
+    if (inventoryStep === "count" && countProduct) {
+      const expectedDescription = formatStockQuantity(countProduct)
+      const variance = countProductTotal - safeNumber(countProduct.currentStock)
+      const hasDifference = countProductHasValues && Math.abs(variance) > 0.00000001
+
+      return (
+        <main className="mx-auto flex min-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col px-4 py-5 sm:px-6">
+          <header className="flex items-center gap-3">
+            <Button type="button" variant="outline" size="icon" aria-label="Retour" onClick={() => inventoryIndex > 0 ? setInventoryIndex(index => index - 1) : setInventoryStep("intro")}><ArrowLeft className="h-4 w-4" /></Button>
+            <h1 className="text-xl font-bold">Produit {inventoryIndex + 1}/{countProducts.length}</h1>
+          </header>
+
+          <div className="mt-6 h-2 overflow-hidden rounded-full bg-muted">
+            <div className="h-full rounded-full bg-amber-500 transition-all" style={{ width: `${((inventoryIndex + 1) / Math.max(countProducts.length, 1)) * 100}%` }} />
+          </div>
+
+          <section className="mt-5 flex items-center gap-3 rounded-2xl bg-amber-50 p-4">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-500 font-bold text-white">{String(countProduct.name).slice(0, 1).toUpperCase()}</span>
+            <div className="min-w-0">
+              <p className="truncate font-semibold">{countProduct.name}</p>
+              <p className="text-sm text-muted-foreground">Stock attendu : {expectedDescription}</p>
+            </div>
+          </section>
+
+          <section className="mt-6 space-y-3">
+            <h2 className="text-sm font-medium text-muted-foreground">Quantité réelle comptée par format</h2>
+            <div className="divide-y rounded-2xl border bg-background px-4">
+              {countProductFormats.map(format => (
+                <div key={format.id} className="flex items-center justify-between gap-4 py-4">
+                  <label htmlFor={`count-${countProduct.id}-${format.id}`} className="font-medium">{format.label}</label>
+                  <input
+                    id={`count-${countProduct.id}-${format.id}`}
+                    type="number"
+                    min="0"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="0"
+                    value={countProductValues[format.id] ?? ""}
+                    onChange={event => setInventoryCounts(current => ({
+                      ...current,
+                      [countProduct.id]: { ...(current[countProduct.id] ?? {}), [format.id]: event.target.value },
+                    }))}
+                    className="h-12 w-32 rounded-xl border-2 border-amber-400 bg-background px-3 text-center text-lg font-semibold outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {countProductHasValues && (
+            <div className="mt-4 space-y-3">
+              <div className="rounded-xl bg-amber-50 px-4 py-3 text-center font-semibold text-amber-700">
+                Total compté : {formatStockQuantity({ ...countProduct, currentStock: countProductTotal })}
+              </div>
+              <div className={`rounded-xl px-4 py-3 text-center font-semibold ${hasDifference ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"}`}>
+                {hasDifference ? `Écart : ${variance > 0 ? "+" : ""}${variance.toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${countProduct.unitLabel}` : "Stock correct"}
+              </div>
+            </div>
+          )}
+
+          {inventorySaveError && <p role="alert" className="mt-3 text-sm text-destructive">{inventorySaveError}</p>}
+          <footer className="mt-auto flex items-center gap-2 border-t bg-background py-4">
+            {inventoryIndex > 0 && <Button type="button" variant="ghost" onClick={() => setInventoryIndex(index => index - 1)}><ChevronLeft className="mr-1 h-4 w-4" />Précédent</Button>}
+            <Button type="button" variant="ghost" className="ml-auto" onClick={skipCountProduct}>Passer <ChevronRight className="ml-1 h-4 w-4" /></Button>
+            <Button type="button" className="h-12 min-w-36 bg-amber-500 hover:bg-amber-600" onClick={goToNextCountProduct} disabled={!countProductHasValues}>
+              {inventoryIndex + 1 === countProducts.length ? "Voir le résumé" : "Suivant"}<ChevronRight className="ml-2 h-4 w-4" />
+            </Button>
+          </footer>
+        </main>
+      )
+    }
+
+    return (
+      <main className="mx-auto flex min-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col px-4 py-5 sm:px-6">
+        <header className="flex items-center gap-3">
+          <Button type="button" variant="outline" size="icon" aria-label="Retour au comptage" onClick={() => { setInventoryStep("count"); setInventoryIndex(Math.max(countProducts.length - 1, 0)) }}><ArrowLeft className="h-4 w-4" /></Button>
+          <h1 className="text-xl font-bold">Résumé inventaire</h1>
+        </header>
+
+        <section className="mt-10 space-y-5">
+          <h2 className="text-2xl font-semibold">Résumé de l'inventaire</h2>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-2xl border bg-background p-4"><p className="text-2xl font-bold">{countedInventorySummary.length}</p><p className="text-sm text-muted-foreground">comptés</p></div>
+            <div className="rounded-2xl border bg-background p-4"><p className="text-2xl font-bold">{inventoryDiscrepancyCount}</p><p className="text-sm text-muted-foreground">écarts</p></div>
+            <div className="rounded-2xl border bg-background p-4"><p className="text-2xl font-bold">{inventorySkippedCount}</p><p className="text-sm text-muted-foreground">passés</p></div>
+          </div>
+          {inventoryDiscrepancyCount === 0 && inventorySkippedCount === 0 ? (
+            <div className="rounded-2xl bg-emerald-50 px-4 py-5 text-center font-semibold text-emerald-700">✓ Tout est en ordre, aucune différence</div>
+          ) : (
+            <div className="space-y-2">
+              {countedInventorySummary.filter(item => Math.abs(item.variance) > 0.00000001).map(({ product, variance }) => (
+                <div key={product.id} className="flex justify-between gap-3 rounded-xl border bg-background p-3 text-sm"><span>{product.name}</span><strong className={variance < 0 ? "text-rose-700" : "text-emerald-700"}>{variance > 0 ? "+" : ""}{variance.toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {product.unitLabel}</strong></div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {inventorySaveError && <p role="alert" className="mt-4 text-sm text-destructive">{inventorySaveError}</p>}
+        <footer className="mt-auto border-t bg-background py-4">
+          <Button type="button" className="h-14 w-full bg-amber-500 text-base hover:bg-amber-600" disabled={isSavingInventory || countedInventorySummary.length === 0} onClick={saveInventoryCount}>
+            {isSavingInventory ? <><span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />Sauvegarde...</> : "Sauvegarder l'inventaire"}
+          </Button>
+        </footer>
+      </main>
+    )
+  }
+
+  if (mainView === "history") {
+    return (
+      <main className="mx-auto min-h-screen w-full max-w-5xl space-y-5 px-4 py-5 pb-10 sm:px-6">
+        <header className="flex items-center gap-3">
+          <Button type="button" variant="outline" size="icon" aria-label="Retour au stock" onClick={() => setMainView("inventory")}><ArrowLeft className="h-4 w-4" /></Button>
+          <div><h1 className="text-xl font-bold">Historique du stock</h1><p className="text-sm text-muted-foreground">Réceptions et stock initial</p></div>
+          <Button type="button" variant="ghost" size="icon" className="ml-auto" aria-label={showValues ? "Masquer les montants" : "Afficher les montants"} onClick={() => setShowValues(value => !value)}>
+            {showValues ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
+          </Button>
+        </header>
+
+        <div className="relative">
+          <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+          <input className="h-11 w-full rounded-xl border bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="Chercher un produit, un fournisseur..." value={historySearch} onChange={event => setHistorySearch(event.target.value)} />
+        </div>
+
+        <section className="space-y-3">
+          {historyRows.length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Aucun mouvement trouvé.</div>
+          ) : historyRows.map((row, index) => (
+            <article key={`${row.id}-${row.sku}-${index}`} className="flex items-center gap-3 rounded-2xl border bg-background p-4">
+              <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${row.type === "sortie" ? "bg-rose-50 text-rose-600" : row.type === "initial" ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-700"}`}>
+                {row.type === "sortie" ? <TrendingDown className="h-5 w-5" /> : row.type === "initial" ? <Package className="h-5 w-5" /> : <Boxes className="h-5 w-5" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-semibold">{row.name}</p>
+                <p className="truncate text-sm text-muted-foreground">{row.description}</p>
+              </div>
+              <div className="shrink-0 text-right">
+                <p className="font-medium">{row.processedBy}</p>
+                <p className="text-xs text-muted-foreground">{row.date}</p>
+              </div>
+            </article>
+          ))}
+        </section>
+      </main>
+    )
+  }
+
   return (
     <div className="space-y-6">
+      <div className="mx-auto w-full max-w-5xl space-y-4 px-1 sm:px-0">
+        <header className="flex items-center gap-3">
+          <Button type="button" variant="outline" size="icon" aria-label="Retour au stock" onClick={() => setMainView("inventory")}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-xl font-bold">Valeur du stock</h1>
+            <p className="text-sm text-muted-foreground">Inventaire actuel · {selectedCurrency?.nom ?? "Boutique"}</p>
+          </div>
+          <Button type="button" variant="ghost" size="icon" aria-label={showValues ? "Masquer les montants" : "Afficher les montants"} title={showValues ? "Masquer les montants" : "Afficher les montants"} onClick={() => setShowValues(value => !value)}>
+            {showValues ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
+          </Button>
+        </header>
+
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm text-muted-foreground">Afficher les montants en</span>
+          <Select value={selectedCurrencyId ? String(selectedCurrencyId) : ""} onValueChange={value => setSelectedCurrencyId(Number(value))}>
+            <SelectTrigger className="w-40" aria-label="Devise de valorisation"><SelectValue placeholder="Devise" /></SelectTrigger>
+            <SelectContent>
+              {currencyOptions.map(currency => <SelectItem key={currency.id} value={String(currency.id)}>{currency.code || currency.symbole || currency.nom}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <section className="relative overflow-hidden rounded-2xl bg-indigo-600 px-5 py-5 text-white sm:px-7 sm:py-6">
+          <div className="absolute -right-10 -top-16 h-56 w-56 rounded-full bg-white/10" />
+          <p className="relative text-xs font-semibold uppercase tracking-[0.18em] text-indigo-100">Valeur du stock</p>
+          <p className="relative mt-2 text-3xl font-bold sm:text-4xl">{formatVisibleMoney(detailValues.currentRetail)}</p>
+          <p className="relative mt-2 text-sm text-indigo-100">{detailValues.productCount} produits</p>
+        </section>
+
+        <section className="rounded-2xl border bg-background p-4 sm:p-5">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Valorisation</h2>
+          <div className="mt-3 divide-y">
+            <div className="flex items-center justify-between gap-4 py-3"><span>Au prix de vente</span><strong>{formatVisibleMoney(detailValues.currentRetail)}</strong></div>
+            <div className="flex items-center justify-between gap-4 py-3"><span>Au prix d'achat</span><strong>{formatVisibleMoney(detailValues.currentCost)}</strong></div>
+            <div className="flex items-center justify-between gap-4 border-t py-3 text-emerald-700"><span className="font-semibold">Bénéfice potentiel</span><strong>{formatVisibleMoney(detailValues.currentPotentialProfit)}</strong></div>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border bg-background p-4 sm:p-5">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">État du stock</h2>
+          <div className="mt-3 divide-y">
+            <div className="flex items-center justify-between py-3"><span>Produits</span><strong>{detailValues.productCount}</strong></div>
+            <div className="flex items-center justify-between py-3"><span>En rupture</span><strong>{detailValues.outOfStock}</strong></div>
+            <div className="flex items-center justify-between py-3"><span>Stock bas</span><strong className="text-amber-600">{detailValues.lowStock}</strong></div>
+            <div className="flex items-center justify-between py-3"><span>Sans prix d'achat</span><strong>{detailValues.noPurchasePrice}</strong></div>
+          </div>
+        </section>
+
+        <div className="grid grid-cols-4 gap-2" role="group" aria-label="Période d'activité">
+          {[["7", "7 jours"], ["30", "30 jours"], ["month", "Ce mois"], ["year", "Cette année"]].map(([value, label]) => (
+            <Button key={value} type="button" size="sm" className="px-2 text-xs sm:text-sm" variant={detailsPeriod === value ? "default" : "outline"} onClick={() => setDetailsPeriod(value)}>{label}</Button>
+          ))}
+        </div>
+
+        <section className="rounded-2xl border bg-background p-4 sm:p-5">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Activité</h2>
+          <div className="mt-3 divide-y">
+            <div className="flex items-center justify-between gap-4 py-3"><span className="flex items-center gap-2"><ShoppingCart className="h-4 w-4 text-emerald-600" />Ventes (CA)</span><strong>{formatVisibleMoney(detailValues.salesRevenue)}</strong></div>
+            <div className="flex items-center justify-between gap-4 py-3"><span className="flex items-center gap-2"><Boxes className="h-4 w-4 text-amber-600" />Achats reçus</span><strong>{formatVisibleMoney(detailValues.purchases)}</strong></div>
+            <div className="flex items-center justify-between gap-4 py-3"><span>Ventes − achats</span><strong>{formatVisibleMoney(detailValues.periodDifference)}</strong></div>
+          </div>
+          {detailValues.missingSalesRates > 0 && <p className="mt-2 text-xs text-amber-700">Taux manquant pour {detailValues.missingSalesRates} ligne(s) de vente.</p>}
+        </section>
+
+        <section className="rounded-2xl border bg-background p-4 sm:p-5">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Produits les plus vendus</h2>
+          <div className="mt-3 divide-y">
+            {detailValues.topProducts.length === 0 ? (
+              <p className="py-3 text-sm text-muted-foreground">Aucune vente sur cette période.</p>
+            ) : detailValues.topProducts.map((product, index) => (
+              <div key={product.id} className="flex items-center gap-3 py-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{index + 1}</span>
+                <div className="min-w-0 flex-1"><p className="truncate font-medium">{product.name}</p><p className="text-xs text-muted-foreground">{product.quantity.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} vendus</p></div>
+                <strong className="shrink-0 text-emerald-700">{formatVisibleMoney(product.revenue)}</strong>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <Button type="button" variant="outline" className="w-full" onClick={() => setMainView("reports")}>
+          <FileSpreadsheet className="mr-2 h-4 w-4" />Rapports FIFO et exports
+        </Button>
+      </div>
+
+      {mainView === "reports" && !showValues && (
+        <section className="mx-auto w-full max-w-5xl rounded-2xl border bg-background p-5 text-center">
+          <p className="text-sm text-muted-foreground">Les chiffres sont masqués. Affiche-les pour consulter les rapports et exports détaillés.</p>
+          <Button type="button" variant="outline" className="mt-3" onClick={() => setShowValues(true)}><Eye className="mr-2 h-4 w-4" />Afficher les montants</Button>
+        </section>
+      )}
+
+      <div className={mainView === "reports" && showValues ? "space-y-6" : "hidden"}>
+      <Button type="button" variant="ghost" className="print:hidden" onClick={() => setMainView("details")}>
+        <ArrowLeft className="mr-2 h-4 w-4" />Retour aux détails du stock
+      </Button>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-foreground">Rapports de Stock</h1>
@@ -815,7 +1463,7 @@ export default function StockReportsPage() {
           </TabsTrigger>
           <TabsTrigger value="restock-history">
             <FileText className="h-4 w-4 mr-2" />
-            Historique Réappro
+            Historique
           </TabsTrigger>
         </TabsList>
 
@@ -1238,7 +1886,7 @@ export default function StockReportsPage() {
                           <TableRow key={idx}>
                             <TableCell className="font-mono text-sm">{product.sku}</TableCell>
                             <TableCell>{product.name}</TableCell>
-                            <TableCell className="text-right">{product.quantity}</TableCell>
+                            <TableCell className="text-right">{product.quantity} {product.unitLabel}</TableCell>
                             <TableCell className="text-right">{selectedCurrencySymbol} {product.displayCost.toFixed(2)}</TableCell>
                             <TableCell className="text-right font-medium">
                               {selectedCurrencySymbol} {(product.quantity * product.displayCost).toFixed(2)}
@@ -1260,6 +1908,8 @@ export default function StockReportsPage() {
         <h1 className="text-2xl font-bold">Rapport de Stock</h1>
         <p className="text-sm">Généré : {new Date().toLocaleString()}</p>
       </div>
+      </div>
     </div>
   )
 }
+

@@ -1,6 +1,7 @@
 "use client"
 
-import { PlusCircle } from "lucide-react"
+import { useState } from "react"
+import { Package, PlusCircle } from "lucide-react"
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -12,6 +13,28 @@ interface ProductGridProps {
   category: string
   searchQuery: string
   products: Product[]
+}
+
+function ProductImage({ image, name }: { image?: string | null; name: string }) {
+  const [failed, setFailed] = useState(false)
+
+  if (!image || failed) {
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-muted text-muted-foreground" aria-label={`Aucune image pour ${name}`}>
+        <Package className="h-10 w-10" aria-hidden="true" />
+      </div>
+    )
+  }
+
+  return (
+    <img
+      src={image}
+      alt={name}
+      className="h-full w-full object-cover"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  )
 }
 
 export default function ProductGrid({ category, searchQuery, products }: ProductGridProps) {
@@ -37,7 +60,10 @@ export default function ProductGrid({ category, searchQuery, products }: Product
       return
     }
 
-    if (Number.isFinite(stock) && currentQuantity >= stock) {
+    const existingItem = cart.find((item) => item.id === product.id)
+    const currentStockUnits = currentQuantity * Number(existingItem?.conversionFactor ?? 1)
+    const nextStockUnits = currentStockUnits + Number(existingItem?.conversionFactor ?? product.conversionFactor ?? 1)
+    if (Number.isFinite(stock) && nextStockUnits > stock) {
       toast({
         variant: "destructive",
         title: "Stock insuffisant",
@@ -65,12 +91,7 @@ export default function ProductGrid({ category, searchQuery, products }: Product
             <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100 z-10">
               <PlusCircle className="h-10 w-10 text-white" />
             </div>
-            <img
-              src={product.image || "/placeholder.svg"}
-              alt={product.name}
-              className="h-full w-full object-cover"
-              loading="lazy"
-            />
+            <ProductImage image={product.image} name={product.name} />
             {(product.stock ?? 0) <= 0 && (
               <div className="absolute left-2 top-2 z-10">
                 <Badge variant="destructive" className="text-[10px] uppercase tracking-wide">
@@ -97,9 +118,9 @@ export default function ProductGrid({ category, searchQuery, products }: Product
                 {product.name}
               </h3>
               <p className="text-[11px] font-semibold text-emerald-600 sm:text-sm">
-                {(product.currencySymbol ?? "$")}{product.price.toFixed(2)}
+                {(product.currencySymbol ?? "$")}{product.price.toFixed(2)} / {product.stockUnitLabel ?? "unité"}
               </p>
-              {(product.stock ?? 0) > 0 && <p className="hidden text-[11px] text-muted-foreground sm:block">Disponible immédiatement</p>}
+              {(product.stock ?? 0) > 0 && <p className="hidden text-[11px] text-muted-foreground sm:block">Stock : {product.stock} {product.stockUnitLabel ?? "unités"}</p>}
             </div>
           </CardContent>
         </Card>

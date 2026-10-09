@@ -7,7 +7,7 @@ import { backendRequest } from "@/app/services/backend"
 import formatMoney from "@/lib/formatMoney"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -37,10 +37,24 @@ interface Devise {
   symbole: string
 }
 
+interface ProductUnit {
+  id_unite: number
+  facteur: string
+  prix?: string | null
+  id_devise?: number | null
+  unite?: { nom: string; symbole: string }
+}
+
 interface Produit {
   id: number
   code: string
   nom: string
+  unite_id: number
+  unite?: { id: number; nom: string; symbole: string }
+  unitesAchat?: ProductUnit[]
+  unites_achat?: ProductUnit[]
+  unitesVente?: ProductUnit[]
+  unites_vente?: ProductUnit[]
 }
 
 interface LotRaw {
@@ -87,6 +101,17 @@ interface Approvisionnement extends ApprovisionnementRaw {
 
 interface ProductSelection {
   selected: boolean
+  id_unite: string
+  quantite: string
+  prix_unitaire: string
+  prix_vente: string
+  id_devise: string
+  paye_par_caisse: boolean
+  additionalLines: AdditionalPurchaseLine[]
+}
+
+interface AdditionalPurchaseLine {
+  id_unite: string
   quantite: string
   prix_unitaire: string
   prix_vente: string
@@ -135,6 +160,7 @@ function EditSingleLigneDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Modifier la devise - {ligne?.produit?.nom}</DialogTitle>
+          <DialogDescription className="sr-only">Choisis la devise à appliquer à cette ligne d'approvisionnement.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2 rounded-lg bg-muted/50 p-4">
@@ -262,6 +288,7 @@ function EditMultipleLignesDialog({
       <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Modifier la devise pour plusieurs produits</DialogTitle>
+          <DialogDescription className="sr-only">Sélectionne les lignes et la devise à appliquer à cet approvisionnement.</DialogDescription>
         </DialogHeader>
         
         <div className="space-y-4 flex-1 overflow-y-auto">
@@ -372,10 +399,23 @@ function normalizeAppro(raw: ApprovisionnementRaw): Approvisionnement {
 function createEmptySelection(): ProductSelection {
   return {
     selected: false,
+    id_unite: "",
     quantite: "",
     prix_unitaire: "",
     prix_vente: "",
     id_devise: "",
+    paye_par_caisse: false,
+    additionalLines: [],
+  }
+}
+
+function createEmptyPurchaseLine(unitId = "", price = "", currencyId = ""): AdditionalPurchaseLine {
+  return {
+    id_unite: unitId,
+    quantite: "",
+    prix_unitaire: price,
+    prix_vente: "",
+    id_devise: currencyId,
     paye_par_caisse: false,
   }
 }
@@ -399,6 +439,7 @@ export default function ApprovisionnementsPage() {
   const [selectedApprovisionnement, setSelectedApprovisionnement] = useState<Approvisionnement | null>(null)
   const [historySearch, setHistorySearch] = useState("")
   const [showOnlyWithLines, setShowOnlyWithLines] = useState(false)
+  const [requestedProductId, setRequestedProductId] = useState<number | null>(null)
   
   // Nouveaux états pour l'édition de devise
   const [editingLigne, setEditingLigne] = useState<LigneRaw | null>(null)
@@ -413,7 +454,24 @@ export default function ApprovisionnementsPage() {
       backendRequest<UserLite>("/user"),
     ])
     setFournisseurs(fournisseursRes.data ?? [])
-    setProduits(produitsRes.data ?? [])
+    setProduits((produitsRes.data ?? []).map(product => {
+      const purchaseUnits = product.unitesAchat ?? product.unites_achat ?? []
+      const saleUnits = product.unitesVente ?? product.unites_vente ?? []
+      const unitsById = new Map<number, NonNullable<Produit["unitesAchat"]>[number]>()
+
+      for (const unit of [...purchaseUnits, ...saleUnits]) {
+        if (!unitsById.has(unit.id_unite)) unitsById.set(unit.id_unite, unit)
+      }
+      if (!unitsById.has(product.unite_id)) {
+        unitsById.set(product.unite_id, {
+          id_unite: product.unite_id,
+          facteur: "1",
+          unite: product.unite,
+        })
+      }
+
+      return { ...product, unitesAchat: Array.from(unitsById.values()) }
+    }))
     setDevises(devisesRes.data ?? [])
     setCurrentUserId(currentUserRes.id)
   }, [])
@@ -553,6 +611,39 @@ export default function ApprovisionnementsPage() {
   }, [fetchLookups, fetchApprovisionnements])
 
   useEffect(() => {
+    const productId = Number(new URLSearchParams(window.location.search).get("produit"))
+    if (Number.isInteger(productId) && productId > 0) setRequestedProductId(productId)
+  }, [])
+
+  useEffect(() => {
+    if (requestedProductId === null || produits.length === 0) return
+
+    const product = produits.find(item => item.id === requestedProductId)
+    if (!product) {
+      setFormError("Le produit demandé est introuvable dans le catalogue.")
+      setRequestedProductId(null)
+      return
+    }
+
+    const defaultDeviseId = devises[0] ? String(devises[0].id) : ""
+    setEditing(null)
+    setFormData({ ...EMPTY_FORM })
+    setProductSelections({
+      [product.id]: {
+        ...createEmptySelection(),
+        selected: true,
+        id_unite: String(product.unitesAchat?.[0]?.id_unite ?? product.unite_id),
+        prix_unitaire: String(product.unitesAchat?.[0]?.prix ?? ""),
+        id_devise: String(product.unitesAchat?.[0]?.id_devise ?? defaultDeviseId),
+      },
+    })
+    setProductSearch(product.nom)
+    setFormError("")
+    setShowDialog(true)
+    setRequestedProductId(null)
+  }, [requestedProductId, produits, devises])
+
+  useEffect(() => {
     const timer = setTimeout(() => fetchApprovisionnements(searchInput), 300)
     return () => clearTimeout(timer)
   }, [searchInput, fetchApprovisionnements])
@@ -592,12 +683,96 @@ export default function ApprovisionnementsPage() {
     setProductSelections(prev => {
       const current = prev[productId] ?? createEmptySelection()
       const defaultDeviseId = devises[0] ? String(devises[0].id) : ""
+      const product = produits.find(item => item.id === productId)
+      const unitId = current.id_unite || String(product?.unitesAchat?.[0]?.id_unite ?? product?.unite_id ?? "")
+      const purchaseUnit = product?.unitesAchat?.find(unit => String(unit.id_unite) === unitId)
       return {
         ...prev,
         [productId]: {
           ...current,
           selected: !current.selected,
-          id_devise: current.id_devise || defaultDeviseId,
+          id_unite: unitId,
+          prix_unitaire: current.prix_unitaire || String(purchaseUnit?.prix ?? ""),
+          id_devise: current.id_devise || String(purchaseUnit?.id_devise ?? defaultDeviseId),
+        },
+      }
+    })
+  }
+
+  const changePurchaseUnit = (productId: number, unitId: string) => {
+    const product = produits.find(item => item.id === productId)
+    const unit = product?.unitesAchat?.find(item => String(item.id_unite) === unitId)
+    setProductSelections(prev => {
+      const current = prev[productId] ?? createEmptySelection()
+      return {
+        ...prev,
+        [productId]: {
+          ...current,
+          id_unite: unitId,
+          prix_unitaire: String(unit?.prix ?? ""),
+          id_devise: String(unit?.id_devise ?? current.id_devise ?? devises[0]?.id ?? ""),
+        },
+      }
+    })
+  }
+
+  const addAdditionalPurchaseLine = (productId: number) => {
+    const product = produits.find(item => item.id === productId)
+    if (!product) return
+    setProductSelections(prev => {
+      const current = prev[productId] ?? createEmptySelection()
+      const units = product.unitesAchat?.length
+        ? product.unitesAchat
+        : [{ id_unite: product.unite_id, facteur: "1", unite: product.unite }]
+      const usedUnitIds = new Set([current.id_unite, ...current.additionalLines.map(line => line.id_unite)])
+      const unit = units.find(option => !usedUnitIds.has(String(option.id_unite))) ?? units[0]
+      const defaultCurrencyId = devises[0] ? String(devises[0].id) : ""
+      return {
+        ...prev,
+        [productId]: {
+          ...current,
+          additionalLines: [
+            ...current.additionalLines,
+            createEmptyPurchaseLine(
+              String(unit.id_unite),
+              String(product.unitesAchat?.find(option => option.id_unite === unit.id_unite)?.prix ?? ""),
+              String(product.unitesAchat?.find(option => option.id_unite === unit.id_unite)?.id_devise ?? defaultCurrencyId),
+            ),
+          ],
+        },
+      }
+    })
+  }
+
+  const updateAdditionalPurchaseLine = (productId: number, index: number, changes: Partial<AdditionalPurchaseLine>) => {
+    const product = produits.find(item => item.id === productId)
+    setProductSelections(prev => {
+      const current = prev[productId] ?? createEmptySelection()
+      const additionalLines = current.additionalLines.map((line, lineIndex) => {
+        if (lineIndex !== index) return line
+        if (changes.id_unite && product) {
+          const unit = product.unitesAchat?.find(option => String(option.id_unite) === changes.id_unite)
+          return {
+            ...line,
+            ...changes,
+            prix_unitaire: String(unit?.prix ?? ""),
+            id_devise: String(unit?.id_devise ?? line.id_devise ?? devises[0]?.id ?? ""),
+          }
+        }
+        return { ...line, ...changes }
+      })
+      return { ...prev, [productId]: { ...current, additionalLines } }
+    })
+  }
+
+  const removeAdditionalPurchaseLine = (productId: number, index: number) => {
+    setProductSelections(prev => {
+      const current = prev[productId] ?? createEmptySelection()
+      return {
+        ...prev,
+        [productId]: {
+          ...current,
+          additionalLines: current.additionalLines.filter((_, lineIndex) => lineIndex !== index),
         },
       }
     })
@@ -626,6 +801,9 @@ export default function ApprovisionnementsPage() {
           next[product.id] = {
             ...current,
             selected: true,
+            id_unite: current.id_unite || String(product.unitesAchat?.[0]?.id_unite ?? product.unite_id),
+            prix_unitaire: current.prix_unitaire || String(product.unitesAchat?.[0]?.prix ?? ""),
+            id_devise: current.id_devise || String(product.unitesAchat?.[0]?.id_devise ?? devises[0]?.id ?? ""),
           }
         }
       }
@@ -664,25 +842,40 @@ export default function ApprovisionnementsPage() {
       return
     }
 
+    const selectedLines = produits.flatMap(product => {
+      const selection = productSelections[product.id]
+      if (!selection?.selected) return []
+      return [
+        {
+          id_produit: product.id,
+          id_unite: Number(selection.id_unite || product.unitesAchat?.[0]?.id_unite || product.unite_id),
+          quantite: Number(selection.quantite),
+          prix_unitaire: Number(selection.prix_unitaire),
+          prix_vente: selection.prix_vente === "" ? null : Number(selection.prix_vente),
+          id_devise: Number(selection.id_devise),
+          paye_par_caisse: Boolean(selection.paye_par_caisse),
+        },
+        ...selection.additionalLines.map(line => ({
+          id_produit: product.id,
+          id_unite: Number(line.id_unite),
+          quantite: Number(line.quantite),
+          prix_unitaire: Number(line.prix_unitaire),
+          prix_vente: line.prix_vente === "" ? null : Number(line.prix_vente),
+          id_devise: Number(line.id_devise),
+          paye_par_caisse: Boolean(line.paye_par_caisse),
+        })),
+      ]
+    })
+
     if (!editing) {
-      const selectedLines = produits
-        .map(product => {
-          const selection = productSelections[product.id]
-          if (!selection?.selected) return null
-
-          return {
-            id_produit: product.id,
-            quantite: Number(selection.quantite),
-            prix_unitaire: Number(selection.prix_unitaire),
-            prix_vente: selection.prix_vente === "" ? null : Number(selection.prix_vente),
-            id_devise: Number(selection.id_devise),
-          }
-        })
-        .filter((line): line is { id_produit: number; quantite: number; prix_unitaire: number; prix_vente: number | null; id_devise: number } => line !== null)
-
-      const hasInvalidLine = selectedLines.some(line => !Number.isFinite(line.quantite) || line.quantite <= 0 || !Number.isFinite(line.prix_unitaire) || line.prix_unitaire < 0 || !line.id_devise || (line.prix_vente !== null && (!Number.isFinite(line.prix_vente) || line.prix_vente < 0)))
-      if (hasInvalidLine || selectedLines.length === 0) {
-        setFormError("Coche au moins un produit et renseigne une quantité positive, un prix d'achat décimal, un prix de vente valide et une devise.")
+      const hasMissingRequiredValue = produits.some(product => {
+        const selection = productSelections[product.id]
+        if (!selection?.selected) return false
+        return [selection, ...selection.additionalLines].some(line => !line.quantite.trim() || !line.prix_unitaire.trim())
+      })
+      const hasInvalidLine = selectedLines.some(line => !Number.isFinite(line.quantite) || line.quantite <= 0 || !Number.isFinite(line.prix_unitaire) || line.prix_unitaire < 0 || !line.id_unite || !line.id_devise || (line.prix_vente !== null && (!Number.isFinite(line.prix_vente) || line.prix_vente < 0)))
+      if (hasMissingRequiredValue || hasInvalidLine || selectedLines.length === 0) {
+        setFormError("Coche au moins un produit et renseigne, pour chaque unité achetée, une quantité positive, un prix d'achat, un prix de vente valide et une devise.")
         return
       }
     }
@@ -698,28 +891,7 @@ export default function ApprovisionnementsPage() {
       }
 
       if (!editing) {
-        body.lignes = produits
-          .map(product => {
-            const selection = productSelections[product.id]
-            if (!selection?.selected) return null
-
-            return {
-              id_produit: product.id,
-              quantite: Number(selection.quantite),
-              prix_unitaire: Number(selection.prix_unitaire),
-              prix_vente: selection.prix_vente === "" ? null : Number(selection.prix_vente),
-              id_devise: Number(selection.id_devise),
-              paye_par_caisse: Boolean(selection.paye_par_caisse),
-            }
-          })
-          .filter((line): line is {
-            id_produit: number;
-            quantite: number;
-            prix_unitaire: number;
-            prix_vente: number | null;
-            id_devise: number;
-            paye_par_caisse: boolean;
-          } => line !== null)
+        body.lignes = selectedLines
       }
 
       if (editing) {
@@ -1091,6 +1263,7 @@ export default function ApprovisionnementsPage() {
         <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>{editing ? "Modifier l'approvisionnement" : "Nouvel approvisionnement"}</DialogTitle>
+            <DialogDescription className="sr-only">Saisis le fournisseur, les quantités reçues, les unités d'achat et les prix.</DialogDescription>
           </DialogHeader>
 
           <form onSubmit={handleSubmit} className="space-y-5 overflow-y-auto flex-1 pr-1">
@@ -1123,7 +1296,7 @@ export default function ApprovisionnementsPage() {
                       <p className="text-sm font-semibold">Produits à approvisionner</p>
                       <Badge variant="secondary">{selectedProductsCount} sélectionné(s)</Badge>
                     </div>
-                    <p className="text-xs text-muted-foreground">Coche seulement les produits voulus, puis complète prix d'achat, prix de vente et devise.</p>
+                    <p className="text-xs text-muted-foreground">Coche un produit et complète sa première unité; tu peux ajouter d’autres unités du même produit avec leurs quantités et prix.</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button type="button" variant="outline" size="sm" onClick={selectAllVisibleProducts}>
@@ -1165,12 +1338,13 @@ export default function ApprovisionnementsPage() {
                       filteredProducts.map((product) => {
                         const selection = productSelections[product.id] ?? createEmptySelection()
                         const defaultDeviseId = devises[0] ? String(devises[0].id) : ""
+                        const purchaseUnits = product.unitesAchat?.length
+                          ? product.unitesAchat
+                          : [{ id_unite: product.unite_id, facteur: "1", unite: product.unite }]
 
                         return (
-                          <div
-                            key={product.id}
-                            className={`grid grid-cols-[auto_1.4fr_.7fr_.8fr_.8fr_.8fr_.9fr] items-center gap-3 border-b px-4 py-4 transition-colors last:border-b-0 ${selection.selected ? "bg-amber-50/70" : "hover:bg-muted/40"}`}
-                          >
+                          <div key={product.id} className={`border-b px-4 py-4 transition-colors last:border-b-0 ${selection.selected ? "bg-amber-50/70" : "hover:bg-muted/40"}`}>
+                          <div className="grid grid-cols-[auto_1.4fr_.7fr_.8fr_.8fr_.8fr_.9fr] items-center gap-3">
                             <Checkbox
                               checked={selection.selected}
                               onCheckedChange={() => toggleProduct(product.id)}
@@ -1180,11 +1354,37 @@ export default function ApprovisionnementsPage() {
                             <div className="min-w-0">
                               <p className="truncate font-medium">{product.nom}</p>
                               <p className="text-xs text-muted-foreground font-mono">{product.code}</p>
+                              <Select
+                                value={selection.id_unite || String(product.unitesAchat?.[0]?.id_unite ?? product.unite_id)}
+                                onValueChange={(value) => changePurchaseUnit(product.id, value)}
+                                disabled={!selection.selected}
+                              >
+                                <SelectTrigger className="mt-2 h-8 rounded-lg text-xs"><SelectValue placeholder="Unité d'achat" /></SelectTrigger>
+                                <SelectContent>
+                                  {purchaseUnits.map(unit => (
+                                    <SelectItem key={unit.id_unite} value={String(unit.id_unite)}>
+                                      {unit.unite?.nom ?? "Unité"} ({unit.unite?.symbole ?? "—"}) · ×{unit.facteur}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {selection.selected && (
+                                <Button
+                                  type="button"
+                                  variant="link"
+                                  size="sm"
+                                  className="mt-1 h-auto p-0 text-xs"
+                                  onClick={() => addAdditionalPurchaseLine(product.id)}
+                                >
+                                  <Plus className="mr-1 h-3 w-3" />Ajouter une autre unité
+                                </Button>
+                              )}
                             </div>
 
                             <Input
                               type="number"
-                              min="1"
+                              min="0.000001"
+                              step="any"
                               inputMode="numeric"
                               disabled={!selection.selected}
                               value={selection.quantite}
@@ -1240,6 +1440,84 @@ export default function ApprovisionnementsPage() {
                                 ))}
                               </SelectContent>
                             </Select>
+                          </div>
+                          {selection.selected && selection.additionalLines.map((line, index) => (
+                            <div key={`${product.id}-additional-${index}`} className="mt-3 grid grid-cols-[auto_1.4fr_.7fr_.8fr_.8fr_.8fr_.9fr_auto] items-center gap-3 rounded-xl border border-dashed bg-background/80 p-3">
+                              <span />
+                              <Select
+                                value={line.id_unite}
+                                onValueChange={(value) => updateAdditionalPurchaseLine(product.id, index, { id_unite: value })}
+                              >
+                                <SelectTrigger className="h-10 rounded-xl">
+                                  <SelectValue placeholder="Autre unité" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {purchaseUnits.map(unit => (
+                                    <SelectItem key={unit.id_unite} value={String(unit.id_unite)}>
+                                      {unit.unite?.nom ?? "Unité"} ({unit.unite?.symbole ?? "—"}) · ×{unit.facteur}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Input
+                                type="number"
+                                min="0.000001"
+                                step="any"
+                                inputMode="decimal"
+                                value={line.quantite}
+                                onChange={(event) => updateAdditionalPurchaseLine(product.id, index, { quantite: event.target.value })}
+                                placeholder="Qté"
+                                className="h-10 rounded-xl"
+                              />
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                inputMode="decimal"
+                                value={line.prix_unitaire}
+                                onChange={(event) => updateAdditionalPurchaseLine(product.id, index, { prix_unitaire: event.target.value })}
+                                placeholder="Achat"
+                                className="h-10 rounded-xl"
+                              />
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                inputMode="decimal"
+                                value={line.prix_vente}
+                                onChange={(event) => updateAdditionalPurchaseLine(product.id, index, { prix_vente: event.target.value })}
+                                placeholder="Vente"
+                                className="h-10 rounded-xl"
+                              />
+                              <div className="flex items-center justify-center">
+                                <Checkbox
+                                  checked={line.paye_par_caisse}
+                                  onCheckedChange={(value) => updateAdditionalPurchaseLine(product.id, index, { paye_par_caisse: Boolean(value) })}
+                                  aria-label="Prendre cet achat dans la caisse"
+                                />
+                              </div>
+                              <Select
+                                value={line.id_devise || defaultDeviseId}
+                                onValueChange={(value) => updateAdditionalPurchaseLine(product.id, index, { id_devise: value })}
+                              >
+                                <SelectTrigger className="h-10 rounded-xl"><SelectValue placeholder="Devise" /></SelectTrigger>
+                                <SelectContent className="max-h-60 overflow-y-auto">
+                                  {devises.map(devise => (
+                                    <SelectItem key={devise.id} value={String(devise.id)}>{devise.symbole} - {devise.code}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => removeAdditionalPurchaseLine(product.id, index)}
+                                aria-label="Supprimer cette unité"
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          ))}
                           </div>
                         )
                       })

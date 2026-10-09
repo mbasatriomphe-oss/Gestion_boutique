@@ -28,6 +28,7 @@ import {
   Users,
   Shield,
   ShieldCheck,
+  BarChart3,
 } from "lucide-react"
 
 export default function Header({ searchQuery, setSearchQuery }) {
@@ -97,6 +98,20 @@ export default function Header({ searchQuery, setSearchQuery }) {
               Administration
             </Button>
           )}
+          {!isAdmin() && (
+            <Button variant="outline" onClick={() => router.push("/vendeur/rapports")} className="inline-flex">
+              <BarChart3 className="mr-2 h-4 w-4" />
+              Rapports
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            onClick={() => router.push(isAdmin() ? "/admin/mon-compte" : "/vendeur/parametres")}
+            className="inline-flex"
+          >
+            <Settings className="mr-2 h-4 w-4" />
+            Paramètres
+          </Button>
 
           {/* User Menu */}
           <DropdownMenu>

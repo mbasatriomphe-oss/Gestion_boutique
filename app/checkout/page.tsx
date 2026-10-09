@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import { ArrowLeft, CreditCard, Wallet, AlertCircle, CheckCircle2, Info } from "lucide-react"
+import { ArrowLeft, CreditCard, Wallet, AlertCircle, CheckCircle2, Info, UserRound, UserPlus } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useCart } from "../context/cart-context"
 import { useAuth } from "../context/auth-context"
 import { backendRequest } from "../services/backend"
+import CustomerModal from "../components/customer-modal"
 
 type BackendResponse<T> = {
   status?: string
@@ -36,6 +37,9 @@ type BackendLot = {
   ligne_approvisionnement?: {
     prix_vente?: string | null
     prix_unitaire?: string | null
+    prix_vente_stock?: string | null
+    prix_unitaire_stock?: string | null
+    facteur_conversion?: string | null
   }
 }
 
@@ -47,6 +51,8 @@ type LineOverrideState = Record<number, string>
 
 type PricingLine = {
   id: number
+  unitId: number
+  unitLabel: string
   name: string
   quantity: number
   sourceCurrencyId: number | null
@@ -107,15 +113,17 @@ async function resolveRate(sourceCurrencyId: number, targetCurrencyId: number) {
 
 export default function CheckoutPage() {
   const router = useRouter()
-  const { cart, clearCart, customer, discountAmount } = useCart()
+  const { cart, clearCart, customer, setCustomer, discountAmount } = useCart()
   const { user, isLoading: authLoading } = useAuth()
   const authUser = user as { id?: string | number; role?: string } | null
 
   const [paymentMethod, setPaymentMethod] = useState("card")
+  const [paymentType, setPaymentType] = useState<"total" | "avance" | "credit">("total")
   const [isProcessing, setIsProcessing] = useState(false)
   const [francAmount, setFrancAmount] = useState("")
   const [dollarAmount, setDollarAmount] = useState("")
   const [singleAmount, setSingleAmount] = useState("")
+  const [splitPaymentTarget, setSplitPaymentTarget] = useState("")
   const [userEditedSingleAmount, setUserEditedSingleAmount] = useState(false)
   const [showPaymentInputs, setShowPaymentInputs] = useState(false)
   const [useSplitPayment, setUseSplitPayment] = useState(false)
@@ -131,6 +139,7 @@ export default function CheckoutPage() {
     }
   }, [authLoading, authUser?.role, router])
   const [paymentError, setPaymentError] = useState<CheckoutError | null>(null)
+  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
   const [catalogError, setCatalogError] = useState("")
   const [isCatalogLoading, setIsCatalogLoading] = useState(true)
   const [currencyOptions, setCurrencyOptions] = useState<BackendDevise[]>([])
@@ -192,7 +201,7 @@ export default function CheckoutPage() {
         setCurrencyOptions(deviseResponse.data ?? [])
 
         const firstSourceCurrencyId = cart
-          .map((item) => lotMap[item.id]?.devise?.id ?? lotMap[item.id]?.id_devise ?? null)
+          .map((item) => item.sourceCurrencyId ?? lotMap[item.id]?.devise?.id ?? lotMap[item.id]?.id_devise ?? null)
           .find((currencyId): currencyId is number => typeof currencyId === "number")
 
         setSelectedCurrencyId((current) => current ?? firstSourceCurrencyId ?? deviseResponse.data?.[0]?.id ?? null)
@@ -229,7 +238,7 @@ export default function CheckoutPage() {
         const sourceCurrencyIds = Array.from(
           new Set(
             cart
-              .map((item) => latestLotByProduct[item.id]?.devise?.id ?? latestLotByProduct[item.id]?.id_devise ?? null)
+              .map((item) => item.sourceCurrencyId ?? latestLotByProduct[item.id]?.devise?.id ?? latestLotByProduct[item.id]?.id_devise ?? null)
               .filter((currencyId): currencyId is number => typeof currencyId === "number" && currencyId > 0),
           ),
         )
@@ -283,11 +292,18 @@ export default function CheckoutPage() {
     return cart.map((item) => {
       const lot = latestLotByProduct[item.id]
       const sourceCurrency = lot?.devise ?? null
-      const sourceCurrencyId = sourceCurrency?.id ?? lot?.id_devise ?? null
-      const sourceCurrencyCode = sourceCurrency?.code ?? item.currencySymbol ?? ""
-      const sourceCurrencySymbol = getCurrencyLabel(sourceCurrency, item.currencySymbol ?? "$")
-      const sourceUnitPrice = Number(lot?.ligne_approvisionnement?.prix_vente ?? lot?.ligne_approvisionnement?.prix_unitaire ?? item.price ?? 0)
-      const purchaseSourceUnitPrice = Number(lot?.ligne_approvisionnement?.prix_unitaire ?? Number.NaN)
+      const sourceCurrencyId = item.sourceCurrencyId ?? sourceCurrency?.id ?? lot?.id_devise ?? null
+      const sourceCurrencyCode = item.currencySymbol ?? sourceCurrency?.code ?? ""
+      const sourceCurrencySymbol = item.currencySymbol ?? getCurrencyLabel(sourceCurrency, "$")
+      const purchaseLine = lot?.ligne_approvisionnement
+      const purchaseFactor = Number(purchaseLine?.facteur_conversion ?? 1)
+      const normalizedSalePrice = purchaseLine?.prix_vente_stock ?? purchaseLine?.prix_unitaire_stock
+      const enteredSalePrice = Number(purchaseLine?.prix_vente ?? purchaseLine?.prix_unitaire ?? item.basePrice ?? item.price ?? 0)
+      const baseSalePrice = Number(normalizedSalePrice ?? (purchaseFactor > 0 ? enteredSalePrice / purchaseFactor : enteredSalePrice))
+      const sourceUnitPrice = Number(item.price ?? baseSalePrice * (item.conversionFactor ?? 1))
+      const normalizedCost = purchaseLine?.prix_unitaire_stock
+      const enteredCost = Number(purchaseLine?.prix_unitaire ?? Number.NaN)
+      const purchaseSourceUnitPrice = Number(normalizedCost ?? (purchaseFactor > 0 ? enteredCost / purchaseFactor : enteredCost)) * (item.conversionFactor ?? 1)
 
       let rate: number | null = 1
       const targetCurrencyId = selectedCurrencyId ?? sourceCurrencyId
@@ -308,6 +324,8 @@ export default function CheckoutPage() {
 
       return {
         id: item.id,
+        unitId: item.saleUnitId ?? 0,
+        unitLabel: item.saleUnitLabel ?? item.stockUnitLabel ?? "unité",
         name: item.name,
         quantity: item.quantity,
         sourceCurrencyId,
@@ -331,9 +349,7 @@ export default function CheckoutPage() {
   )
 
   const sourceSubtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0)
-  const discountRatio = sourceSubtotal > 0 ? discountAmount / sourceSubtotal : 0
-  const convertedDiscount = convertedSubtotal * discountRatio
-  const grandTotal = Math.max(convertedSubtotal - convertedDiscount, 0)
+  const discountRatio = sourceSubtotal > 0 ? Math.min(Math.max(discountAmount / sourceSubtotal, 0), 1) : 0
   const francAmountNum = Number.parseFloat(francAmount) || 0
   const dollarAmountNum = Number.parseFloat(dollarAmount) || 0
   const singleAmountNum = Number.parseFloat(singleAmount) || 0
@@ -377,6 +393,13 @@ export default function CheckoutPage() {
       : 2
 
   const decimalsSelected = currencyDecimals(selectedCurrency)
+  const getSaleUnitPrice = (line: PricingLine) =>
+    Number((line.finalUnitPrice * (1 - discountRatio)).toFixed(decimalsSelected))
+  const grandTotal = pricingLines.reduce(
+    (sum, line) => sum + getSaleUnitPrice(line) * line.quantity,
+    0,
+  )
+  const appliedDiscount = Math.max(convertedSubtotal - grandTotal, 0)
 
   const formatAmountForDisplay = (v: number, currency?: BackendDevise | null) => {
     const s = v.toFixed(currencyDecimals(currency))
@@ -385,11 +408,15 @@ export default function CheckoutPage() {
 
   const francEquivalentRounded = mulExact(francAmountNum, (francRateToSelected ?? 0), decimalsSelected)
   const dollarEquivalentRounded = mulExact(dollarAmountNum, (dollarRateToSelected ?? 0), decimalsSelected)
+  const splitPaymentTargetNum = Number.parseFloat(splitPaymentTarget) || 0
+  const paymentTargetAmount = paymentType === "avance"
+    ? (useSplitPayment ? splitPaymentTargetNum : singleAmountNum)
+    : grandTotal
   const suggestedDollarFromFranc = (() => {
     if (!useSplitPayment) return null
     if (francAmountNum <= 0) return null
     if (!dollarRateToSelected) return null
-    const remainingSelected = Math.max(grandTotal - francEquivalentRounded, 0)
+    const remainingSelected = Math.max(paymentTargetAmount - francEquivalentRounded, 0)
     if (dollarRateToSelected <= 0) return null
     const targetDecimals = Math.max(0, currencyDecimals(dollarCurrency) - 1)
     return roundToDecimals(remainingSelected / dollarRateToSelected, targetDecimals)
@@ -399,18 +426,20 @@ export default function CheckoutPage() {
     if (!useSplitPayment) return null
     if (dollarAmountNum <= 0) return null
     if (!francRateToSelected) return null
-    const remainingSelected = Math.max(grandTotal - dollarEquivalentRounded, 0)
+    const remainingSelected = Math.max(paymentTargetAmount - dollarEquivalentRounded, 0)
     if (francRateToSelected <= 0) return null
     const targetDecimals = Math.max(0, currencyDecimals(francCurrency) - 1)
     return roundToDecimals(remainingSelected / francRateToSelected, targetDecimals)
   })()
-  const paymentAmountNum = useSplitPayment
-    ? francEquivalentRounded + dollarEquivalentRounded
-    : singleAmountNum
+  const paymentAmountNum = paymentType === "credit"
+    ? 0
+    : useSplitPayment
+      ? francEquivalentRounded + dollarEquivalentRounded
+      : singleAmountNum
   const remainingBalance = Math.max(grandTotal - paymentAmountNum, 0)
   const remainingBalanceInFranc = francRateToSelected ? remainingBalance / francRateToSelected : null
   const remainingBalanceInDollar = dollarRateToSelected ? remainingBalance / dollarRateToSelected : null
-  const isFullPayment = paymentAmountNum >= grandTotal && grandTotal > 0
+  const isFullPayment = paymentType === "total" && paymentAmountNum >= grandTotal && grandTotal > 0
   const hasMixedSourceCurrencies = new Set(pricingLines.map((line) => line.sourceCurrencyId).filter(Boolean)).size > 1
   const hasPendingRate = pricingLines.some((line) => line.needsRate && line.rate === null)
   const hasPendingSplitRate = useSplitPayment && ((francAmountNum > 0 && francRateToSelected === null) || (dollarAmountNum > 0 && dollarRateToSelected === null))
@@ -419,6 +448,19 @@ export default function CheckoutPage() {
   const francSymbol = francCurrency?.symbole ?? francCurrency?.code ?? "FC"
   const dollarSymbol = dollarCurrency?.symbole ?? dollarCurrency?.code ?? "$"
   const currencySymbol = getCurrencyLabel(selectedCurrency, pricingLines[0]?.sourceCurrencySymbol ?? "$")
+  const canSubmitPayment =
+    !isProcessing &&
+    (paymentType === "credit" || paymentAmountNum > 0) &&
+    !hasPendingRate &&
+    !hasPendingSplitRate &&
+    !isCatalogLoading &&
+    Boolean(selectedCurrencyId) &&
+    Boolean(customer?.id)
+  const paymentButtonText = paymentType === "credit"
+    ? "Confirmer la vente à crédit"
+    : isSplitPayment
+      ? `Valider le paiement (${francSymbol}${francAmountNum.toFixed(currencyDecimals(francCurrency))} + ${dollarSymbol}${dollarAmountNum.toFixed(currencyDecimals(dollarCurrency))})`
+      : `${paymentType === "total" && isFullPayment ? "Confirmer le paiement" : "Confirmer l'avance"} · ${currencySymbol}${paymentAmountNum.toFixed(decimalsSelected)}`
 
   useEffect(() => {
     // Auto-update the single amount whenever the total or selected currency
@@ -456,7 +498,7 @@ export default function CheckoutPage() {
   }
 
   const validateCard = () => {
-    if (paymentMethod !== "card") return true
+    if (paymentMethod !== "card" || paymentAmountNum <= 0) return true
 
     const cardNumClean = cardNumber.replace(/\s/g, "")
     if (cardNumClean.length < 13 || cardNumClean.length > 19) {
@@ -483,13 +525,47 @@ export default function CheckoutPage() {
     return true
   }
 
+  const handlePaymentTypeChange = (nextType: "total" | "avance" | "credit") => {
+    setPaymentType(nextType)
+    setPaymentError(null)
+    setUseSplitPayment(false)
+
+    if (nextType === "avance") {
+      setShowPaymentInputs(true)
+      setSingleAmount("")
+      setUserEditedSingleAmount(true)
+      setSplitPaymentTarget("")
+    } else if (nextType === "total") {
+      setShowPaymentInputs(false)
+      setSingleAmount(grandTotal.toFixed(decimalsSelected))
+      setUserEditedSingleAmount(false)
+    } else {
+      setShowPaymentInputs(false)
+      setSingleAmount("0")
+      setUserEditedSingleAmount(true)
+    }
+  }
+
   const handlePayment = async () => {
     setPaymentError(null)
 
-    if (pricingLines.length === 0 || paymentAmountNum <= 0) {
+    if (pricingLines.length === 0 || (paymentType !== "credit" && paymentAmountNum <= 0)) {
       setPaymentError({
         title: "Montant invalide",
         description: "Le montant à payer doit être supérieur à zéro.",
+      })
+      return
+    }
+
+    if (
+      (paymentType === "total" && Math.abs(paymentAmountNum - grandTotal) > 0.000001)
+      || (paymentType === "avance" && paymentAmountNum >= grandTotal)
+    ) {
+      setPaymentError({
+        title: "Type de paiement invalide",
+        description: paymentType === "total"
+          ? "Le paiement total doit correspondre exactement au montant de la vente. Choisis « Avance » pour laisser un solde."
+          : "Une avance doit être supérieure à zéro et inférieure au montant total de la vente.",
       })
       return
     }
@@ -533,6 +609,30 @@ export default function CheckoutPage() {
     setIsProcessing(true)
 
     try {
+      const receiptDraft = {
+        date: new Date().toISOString(),
+        customer: {
+          name: customer.name,
+        },
+        currency: {
+          code: selectedCurrency?.code ?? "",
+          symbol: selectedCurrency?.symbole ?? currencySymbol,
+        },
+        paymentType,
+        total: grandTotal,
+        paid: paymentAmountNum,
+        remaining: remainingBalance,
+        discount: appliedDiscount,
+        lines: pricingLines.map((line) => ({
+          name: line.name,
+          unit: line.unitLabel,
+          quantity: line.quantity,
+          unitPrice: getSaleUnitPrice(line),
+          total: getSaleUnitPrice(line) * line.quantity,
+        })),
+      }
+      sessionStorage.setItem("pos_pending_receipt", JSON.stringify(receiptDraft))
+
       const response = await backendRequest<BackendResponse<{ code?: string; id?: number }>>("/ventes", {
         method: "POST",
         body: JSON.stringify({
@@ -540,7 +640,9 @@ export default function CheckoutPage() {
           id_vendeur: Number(authUser.id),
           id_client: Number(customer.id),
           devise_vente_id: selectedCurrencyId,
-          paiements: (
+          type_paiement: paymentType,
+          mode_paiement: paymentType === "credit" ? "cash" : paymentMethod,
+          paiements: paymentType === "credit" ? [] : (
             useSplitPayment
               ? [
                   francAmountNum > 0 && francCurrency
@@ -554,16 +656,18 @@ export default function CheckoutPage() {
           ),
           lignes: pricingLines.map((line) => ({
             id_produit: line.id,
+            ...(line.unitId > 0 ? { id_unite: line.unitId } : {}),
             quantite: line.quantity,
-            prix_vente: Number(line.finalUnitPrice.toFixed(decimalsSelected)),
+            prix_vente: getSaleUnitPrice(line),
             id_devise: selectedCurrencyId,
           })),
         }),
       })
 
       clearCart()
+      const receiptCode = response.data?.code ?? response.data?.id ?? Date.now()
       router.push(
-        `/success?amount=${paymentAmountNum.toFixed(decimalsSelected)}&remaining=${remainingBalance.toFixed(decimalsSelected)}&receipt=${response.data?.code ?? response.data?.id ?? Date.now()}`,
+        `/success?type=${paymentType}&amount=${paymentAmountNum.toFixed(decimalsSelected)}&remaining=${remainingBalance.toFixed(decimalsSelected)}&receipt=${encodeURIComponent(String(receiptCode))}`,
       )
     } catch (error) {
       setPaymentError({
@@ -602,17 +706,59 @@ export default function CheckoutPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background py-4 sm:py-8">
-      <div className="container mx-auto max-w-6xl px-3 sm:px-4">
-        <Button variant="ghost" className="mb-4 sm:mb-6" onClick={() => router.push("/")}> 
+    <div className="min-h-screen bg-background pb-36 pt-4 sm:pb-8 sm:pt-8">
+      <div className="container mx-auto max-w-7xl px-3 sm:px-5">
+        <Button variant="ghost" className="mb-4 sm:mb-6" onClick={() => router.push("/")}>
           <ArrowLeft className="mr-2 h-4 w-4" />
           Retour au point de vente
         </Button>
 
-        <h1 className="mb-4 text-2xl font-bold text-foreground sm:mb-6 sm:text-3xl">Paiement</h1>
+        <div className="mb-5 sm:mb-7">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Finalisation de la vente</p>
+          <h1 className="mt-1 text-2xl font-bold text-foreground sm:text-3xl">Paiement</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Vérifiez la commande, choisissez le règlement, puis confirmez la vente.</p>
+        </div>
 
-        <div className="grid gap-6 lg:grid-cols-2 sm:gap-8">
+        <div className="grid items-start gap-5 sm:gap-7 lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
           <div className="space-y-4 sm:space-y-6">
+            <Card className="overflow-hidden border-primary/20">
+              <CardHeader className="flex flex-col items-start justify-between gap-3 bg-muted/30 sm:flex-row sm:items-center">
+                <div className="min-w-0">
+                  <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
+                    <UserRound className="h-5 w-5 text-primary" />
+                    Client de la vente
+                  </CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">Le client est requis pour enregistrer la vente ou son crédit.</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => setIsCustomerModalOpen(true)}>
+                  <UserPlus className="mr-2 h-4 w-4" />
+                  {customer ? "Modifier" : "Choisir"}
+                </Button>
+              </CardHeader>
+              <CardContent className="pt-4">
+                {customer ? (
+                  <div className="flex items-center gap-3 rounded-lg border bg-background p-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                      <UserRound className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{customer.name}</p>
+                      <p className="truncate text-sm text-muted-foreground">
+                        {customer.phone || customer.email || customer.address || "Coordonnées facultatives"}
+                      </p>
+                    </div>
+                    <Button variant="ghost" size="sm" className="ml-auto shrink-0" onClick={() => setCustomer(null)}>
+                      Retirer
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    Aucun client sélectionné. Ajoutez une fiche avec le nom uniquement ou choisissez un client existant.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle>Résumé de la commande</CardTitle>
@@ -625,7 +771,7 @@ export default function CheckoutPage() {
                         <div>
                           <p className="font-medium text-foreground">{line.name}</p>
                             <p className="text-sm text-muted-foreground">
-                            {line.quantity} x {line.sourceCurrencySymbol}{line.sourceUnitPrice.toFixed(2)} {line.sourceCurrencyCode ? `(${line.sourceCurrencyCode})` : ""}
+                            {line.quantity} {line.unitLabel} x {line.sourceCurrencySymbol}{line.sourceUnitPrice.toFixed(2)} {line.sourceCurrencyCode ? `(${line.sourceCurrencyCode})` : ""}
                           </p>
                           <p className="text-xs text-muted-foreground">
                             Proposé : {currencySymbol}{line.proposedUnitPrice.toFixed(decimalsSelected)} {selectedCurrency?.code ? `(${selectedCurrency.code})` : ""}
@@ -678,10 +824,10 @@ export default function CheckoutPage() {
                     <p>Sous-total</p>
                     <p>{currencySymbol}{convertedSubtotal.toFixed(decimalsSelected)}</p>
                   </div>
-                  {convertedDiscount > 0 && (
+                  {appliedDiscount > 0 && (
                     <div className="flex justify-between text-emerald-600">
                       <p>Remise</p>
-                      <p>-{currencySymbol}{convertedDiscount.toFixed(decimalsSelected)}</p>
+                      <p>-{currencySymbol}{appliedDiscount.toFixed(decimalsSelected)}</p>
                     </div>
                   )}
                   <Separator className="my-2" />
@@ -695,9 +841,48 @@ export default function CheckoutPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Montant du paiement</CardTitle>
+                <CardTitle>Règlement de la vente</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Type de paiement</Label>
+                  <div className="grid gap-2 sm:grid-cols-3" role="group" aria-label="Type de paiement">
+                    {[
+                      { value: "total" as const, title: "Total", description: "Régler tout", icon: CheckCircle2 },
+                      { value: "avance" as const, title: "Avance", description: "Régler une partie", icon: Wallet },
+                      { value: "credit" as const, title: "Crédit", description: "Payer plus tard", icon: CreditCard },
+                    ].map((option) => {
+                      const Icon = option.icon
+                      const selected = paymentType === option.value
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => handlePaymentTypeChange(option.value)}
+                          className={`flex items-center gap-3 rounded-xl border p-3 text-left transition-colors sm:flex-col sm:items-start ${
+                            selected ? "border-primary bg-primary/5 ring-1 ring-primary/20" : "hover:bg-muted/50"
+                          }`}
+                        >
+                          <Icon className={`h-5 w-5 shrink-0 ${selected ? "text-primary" : "text-muted-foreground"}`} />
+                          <span>
+                            <span className="block text-sm font-semibold">{option.title}</span>
+                            <span className="block text-xs text-muted-foreground">{option.description}</span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+                {paymentType === "credit" ? (
+                  <Alert className="border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20">
+                    <Info className="h-4 w-4 text-amber-600" />
+                    <AlertDescription>
+                      Aucun paiement ne sera encaissé. Le solde complet de {currencySymbol}{grandTotal.toFixed(decimalsSelected)} sera enregistré comme crédit du client.
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                <>
                 <div className="space-y-2">
                   <Label>Devise de paiement</Label>
                   <select
@@ -720,10 +905,14 @@ export default function CheckoutPage() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label>Montant de paiement</Label>
-                      <p className="text-sm text-muted-foreground">Saisis le montant à payer. Active le paiement fractionné si tu veux répartir entre francs et dollars.</p>
+                      <Label>{paymentType === "avance" ? "Montant de l'avance" : "Montant payé"}</Label>
+                      <p className="text-sm text-muted-foreground">
+                        {paymentType === "avance"
+                          ? "Saisis un montant inférieur au total; le solde sera ajouté aux crédits du client."
+                          : "Saisis le montant total ou répartis-le entre francs et dollars."}
+                      </p>
                     </div>
-                    {!showPaymentInputs ? (
+                    {!showPaymentInputs && paymentType === "total" ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -745,7 +934,7 @@ export default function CheckoutPage() {
                   {showPaymentInputs && (
                     <div className="space-y-3">
                       <div className="space-y-2">
-                        <Label>Montant ({selectedCurrency?.code ?? currencySymbol})</Label>
+                        <Label>{paymentType === "avance" ? "Montant de l'avance" : `Montant (${selectedCurrency?.code ?? currencySymbol})`}</Label>
                         <div className="relative">
                           <span className="absolute left-3 top-2.5 text-muted-foreground">{selectedCurrency?.symbole ?? currencySymbol}</span>
                           <Input
@@ -767,6 +956,7 @@ export default function CheckoutPage() {
                           variant={useSplitPayment ? "outline" : "secondary"}
                           size="sm"
                           onClick={() => {
+                            setSplitPaymentTarget(paymentType === "avance" ? singleAmount : grandTotal.toFixed(decimalsSelected))
                             setUseSplitPayment(true)
                             setSingleAmount("")
                             setFrancAmount("")
@@ -783,8 +973,8 @@ export default function CheckoutPage() {
                             onClick={() => {
                               setUseSplitPayment(false)
                               if (showPaymentInputs) {
-                                setSingleAmount(grandTotal.toFixed(decimalsSelected))
-                                setUserEditedSingleAmount(false)
+                                setSingleAmount(paymentType === "avance" ? splitPaymentTarget : grandTotal.toFixed(decimalsSelected))
+                                setUserEditedSingleAmount(paymentType === "avance")
                               }
                             }}
                           >
@@ -837,7 +1027,7 @@ export default function CheckoutPage() {
                               size="sm"
                               onClick={() => {
                                 if (francAmountNum > 0 && dollarRateToSelected) {
-                                  const remainingSelected = Math.max(grandTotal - francEquivalentRounded, 0)
+                                  const remainingSelected = Math.max(paymentTargetAmount - francEquivalentRounded, 0)
                                   const suggested = ceilToDecimals(remainingSelected / dollarRateToSelected, currencyDecimals(dollarCurrency))
                                   setDollarAmount(suggested.toFixed(currencyDecimals(dollarCurrency)))
                                 }
@@ -852,7 +1042,7 @@ export default function CheckoutPage() {
                               size="sm"
                               onClick={() => {
                                 if (dollarAmountNum > 0 && francRateToSelected) {
-                                  const remainingSelected = Math.max(grandTotal - dollarEquivalentRounded, 0)
+                                  const remainingSelected = Math.max(paymentTargetAmount - dollarEquivalentRounded, 0)
                                   const suggested = ceilToDecimals(remainingSelected / francRateToSelected, currencyDecimals(francCurrency))
                                   setFrancAmount(suggested.toFixed(currencyDecimals(francCurrency)))
                                 }
@@ -867,10 +1057,10 @@ export default function CheckoutPage() {
                               size="sm"
                               onClick={() => {
                                 if (francCurrency?.id === selectedCurrencyId || !dollarCurrency) {
-                                  setFrancAmount(grandTotal.toFixed(currencyDecimals(francCurrency)))
+                                  setFrancAmount(paymentTargetAmount.toFixed(currencyDecimals(francCurrency)))
                                   setDollarAmount("")
                                 } else if (francRateToSelected) {
-                                  const suggested = ceilToDecimals(grandTotal / francRateToSelected, currencyDecimals(francCurrency))
+                                  const suggested = ceilToDecimals(paymentTargetAmount / francRateToSelected, currencyDecimals(francCurrency))
                                   setFrancAmount(suggested.toFixed(currencyDecimals(francCurrency)))
                                   setDollarAmount("")
                                 }
@@ -884,10 +1074,10 @@ export default function CheckoutPage() {
                               size="sm"
                               onClick={() => {
                                 if (dollarCurrency?.id === selectedCurrencyId || !francCurrency) {
-                                  setDollarAmount(grandTotal.toFixed(currencyDecimals(dollarCurrency)))
+                                  setDollarAmount(paymentTargetAmount.toFixed(currencyDecimals(dollarCurrency)))
                                   setFrancAmount("")
                                 } else if (dollarRateToSelected) {
-                                  const suggested = ceilToDecimals(grandTotal / dollarRateToSelected, currencyDecimals(dollarCurrency))
+                                  const suggested = ceilToDecimals(paymentTargetAmount / dollarRateToSelected, currencyDecimals(dollarCurrency))
                                   setDollarAmount(suggested.toFixed(currencyDecimals(dollarCurrency)))
                                   setFrancAmount("")
                                 }
@@ -901,7 +1091,7 @@ export default function CheckoutPage() {
                               onClick={() => {
                                 if (!(francCurrency && dollarCurrency && francRateToSelected && dollarRateToSelected)) return
 
-                                const halfSelected = grandTotal / 2
+                                const halfSelected = paymentTargetAmount / 2
 
                                 // If selected currency is dollar, make dollar half exact and compute franc equivalent
                                 if (selectedCurrencyId === dollarCurrency?.id) {
@@ -973,11 +1163,13 @@ export default function CheckoutPage() {
                     </div>
                   )}
                 </div>
+                </>
+                )}
               </CardContent>
             </Card>
           </div>
 
-          <div className="space-y-4 sm:space-y-6">
+          <div className="space-y-4 sm:space-y-6 lg:sticky lg:top-5 lg:self-start">
             <Card>
               <CardHeader>
                 <CardTitle>Méthode de paiement</CardTitle>
@@ -1011,7 +1203,7 @@ export default function CheckoutPage() {
               </CardContent>
             </Card>
 
-            {paymentMethod === "card" && (
+            {paymentMethod === "card" && paymentType !== "credit" && (
               <Card>
                 <CardHeader>
                   <CardTitle>Informations de la carte</CardTitle>
@@ -1113,36 +1305,24 @@ export default function CheckoutPage() {
             )}
 
             <Button
-              className="w-full h-14 text-lg font-semibold"
+              className="hidden h-14 w-full text-lg font-semibold lg:flex"
               size="lg"
               onClick={handlePayment}
-              disabled={
-                isProcessing ||
-                paymentAmountNum <= 0 ||
-                hasPendingRate ||
-                hasPendingSplitRate ||
-                isCatalogLoading ||
-                !selectedCurrencyId ||
-                !customer?.id
-              }
+              disabled={!canSubmitPayment}
             >
               {isProcessing ? (
                 <div className="flex items-center gap-2">
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Traitement du paiement...
+                  Enregistrement...
                 </div>
               ) : (
-                <>
-                  {isSplitPayment
-                    ? `Valider paiement fractionné (${francSymbol}${francAmountNum.toFixed(currencyDecimals(francCurrency))} + ${dollarSymbol}${dollarAmountNum.toFixed(currencyDecimals(dollarCurrency))})`
-                    : `${isFullPayment ? "Paiement complet" : "Valider le paiement partiel"} - ${currencySymbol}${paymentAmountNum.toFixed(decimalsSelected)}`}
-                </>
+                paymentButtonText
               )}
             </Button>
 
             {!customer?.id && (
-              <p className="text-sm text-center text-amber-600">
-                Sélectionnez un client dans la barre latérale du panier avant de valider la vente.
+              <p className="hidden text-center text-sm text-amber-600 lg:block">
+                Choisissez ou ajoutez le client dans la section « Client de la vente » avant de valider.
               </p>
             )}
 
@@ -1152,6 +1332,50 @@ export default function CheckoutPage() {
           </div>
         </div>
       </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(0,0,0,0.08)] backdrop-blur lg:hidden print:hidden">
+        <div className="mx-auto max-w-7xl">
+          <div className="mb-2 flex items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">
+                {paymentType === "credit" ? "Montant à crédit" : paymentType === "avance" ? "Avance versée" : "À encaisser"}
+              </p>
+              <p className="truncate text-lg font-bold">
+                {currencySymbol}{(paymentType === "credit" ? grandTotal : paymentAmountNum).toFixed(decimalsSelected)}
+              </p>
+            </div>
+            {paymentType !== "credit" && remainingBalance > 0 && (
+              <p className="shrink-0 text-right text-xs text-muted-foreground">
+                Reste dû<br />
+                <span className="font-semibold text-amber-700 dark:text-amber-400">
+                  {currencySymbol}{remainingBalance.toFixed(decimalsSelected)}
+                </span>
+              </p>
+            )}
+          </div>
+          {!customer?.id && (
+            <p className="mb-2 text-center text-xs text-amber-700 dark:text-amber-400">
+              Choisissez d’abord un client pour continuer.
+            </p>
+          )}
+          <Button
+            className="h-12 w-full text-base font-semibold"
+            size="lg"
+            onClick={handlePayment}
+            disabled={!canSubmitPayment}
+          >
+            {isProcessing
+              ? "Enregistrement de la vente…"
+              : paymentType === "credit"
+                ? "Confirmer le crédit"
+                : paymentType === "avance"
+                  ? "Confirmer l’avance"
+                  : "Confirmer le paiement"}
+          </Button>
+        </div>
+      </div>
+
+      <CustomerModal isOpen={isCustomerModalOpen} onClose={() => setIsCustomerModalOpen(false)} />
     </div>
   )
 }

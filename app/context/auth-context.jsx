@@ -19,6 +19,9 @@ function normalizeUser(user) {
     role: user.role ?? "user",
     name: fullName || user.email,
     email: user.email,
+    nom: user.nom ?? "",
+    post_nom: user.post_nom ?? "",
+    prenom: user.prenom ?? "",
   }
 }
 
@@ -199,6 +202,12 @@ export function AuthProvider({ children }) {
     return user?.role === "vendeur"
   }
 
+  const updateUserProfile = (profile) => {
+    const updatedUser = normalizeUser({ ...user, ...profile })
+    setUser(updatedUser)
+    localStorage.setItem("pos_user", JSON.stringify(updatedUser))
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -208,6 +217,7 @@ export function AuthProvider({ children }) {
         logout,
         isAdmin,
         isSeller,
+        updateUserProfile,
         isAuthenticated: !!user,
       }}
     >
