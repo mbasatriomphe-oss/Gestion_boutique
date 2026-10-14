@@ -25,7 +25,9 @@ import {
   UserCheck,
   ArrowLeftRight,
   Wallet,
+  TrendingDown,
   UserRoundCog,
+  DatabaseBackup,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
@@ -33,6 +35,7 @@ import { cn } from "@/lib/utils"
 import { useAuth } from "../context/auth-context"
 import { useTheme } from "../context/theme-context"
 import { NotificationBell } from "../components/notification-bell"
+import BackupReminder from "./backup-reminder"
 
 const adminNavigation = [
   { name: "Tableau de bord", href: "/admin", icon: LayoutDashboard },
@@ -45,6 +48,8 @@ const adminNavigation = [
   { name: "Clients", href: "/admin/clients", icon: Users },
   { name: "Ventes", href: "/admin/ventes", icon: ShoppingCart },
   { name: "Crédits clients", href: "/admin/credits", icon: Wallet },
+  { name: "Caisses / Sorties", href: "/admin/caisses", icon: TrendingDown },
+  { name: "Sauvegardes", href: "/admin/sauvegardes", icon: DatabaseBackup },
   { name: "Retours", href: "/admin/retours", icon: ArrowLeftRight },
   { name: "Commandes", href: "/admin/orders", icon: ShoppingCart },
   { name: "Fournisseurs", href: "/admin/fournisseurs", icon: Truck },
@@ -212,6 +217,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
       {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
+        <BackupReminder />
         {/* Mobile Header */}
         <div className="flex h-16 items-center justify-between gap-3 border-b bg-card px-4 lg:hidden print:hidden">
           <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

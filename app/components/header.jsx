@@ -29,6 +29,7 @@ import {
   Shield,
   ShieldCheck,
   BarChart3,
+  Wallet,
 } from "lucide-react"
 
 export default function Header({ searchQuery, setSearchQuery }) {
@@ -99,10 +100,16 @@ export default function Header({ searchQuery, setSearchQuery }) {
             </Button>
           )}
           {!isAdmin() && (
-            <Button variant="outline" onClick={() => router.push("/vendeur/rapports")} className="inline-flex">
-              <BarChart3 className="mr-2 h-4 w-4" />
-              Rapports
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => router.push("/vendeur/rapports?type=credits")} className="inline-flex">
+                <Wallet className="mr-2 h-4 w-4" />
+                Crédits
+              </Button>
+              <Button variant="outline" onClick={() => router.push("/vendeur/rapports")} className="inline-flex">
+                <BarChart3 className="mr-2 h-4 w-4" />
+                Rapports
+              </Button>
+            </>
           )}
           <Button
             variant="outline"

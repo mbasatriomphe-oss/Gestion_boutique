@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, type FormEvent } from "react"
 import { AlertCircle, Printer, RefreshCw, Wallet } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -8,8 +8,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { backendRequest } from "@/app/services/backend"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
 interface Currency {
+  id?: number
   code?: string
   nom?: string
   symbole?: string
@@ -71,6 +75,9 @@ export default function AdminCreditsPage() {
   const [report, setReport] = useState<CreditReport | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState("")
+  const [selectedSale, setSelectedSale] = useState<CreditSale | null>(null)
+  const [paymentAmount, setPaymentAmount] = useState("")
+  const [isPaying, setIsPaying] = useState(false)
 
   const fetchReport = useCallback(async () => {
     setIsLoading(true)
@@ -88,6 +95,35 @@ export default function AdminCreditsPage() {
   useEffect(() => {
     void fetchReport()
   }, [fetchReport])
+
+  const submitPayment = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selectedSale) return
+
+    const amount = Number(paymentAmount)
+    const remaining = Number(selectedSale.reste_a_payer ?? 0)
+    const currency = selectedSale.deviseVente ?? selectedSale.devise_vente
+    if (!currency?.id || !Number.isFinite(amount) || amount <= 0 || amount - remaining > 0.000001) {
+      setError("Saisissez un montant valide, inférieur ou égal au solde restant.")
+      return
+    }
+
+    setIsPaying(true)
+    setError("")
+    try {
+      await backendRequest(`/ventes/${selectedSale.id}/paiements`, {
+        method: "POST",
+        body: JSON.stringify({ paiements: [{ devise_id: currency.id, montant: amount }] }),
+      })
+      setSelectedSale(null)
+      setPaymentAmount("")
+      await fetchReport()
+    } catch (paymentError) {
+      setError(paymentError instanceof Error ? paymentError.message : "Impossible d’enregistrer le paiement.")
+    } finally {
+      setIsPaying(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -168,6 +204,7 @@ export default function AdminCreditsPage() {
                         <TableHead className="text-right">Déjà payé</TableHead>
                         <TableHead className="text-right">Reste dû</TableHead>
                         <TableHead>Vendeur</TableHead>
+                        <TableHead className="text-right print:hidden">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -191,6 +228,19 @@ export default function AdminCreditsPage() {
                             <TableCell className="text-right">{displayMoney(sale.montant_paye, currency)}</TableCell>
                             <TableCell className="text-right font-semibold">{displayMoney(sale.reste_a_payer, currency)}</TableCell>
                             <TableCell>{[sale.vendeur?.nom, sale.vendeur?.prenom].filter(Boolean).join(" ") || "—"}</TableCell>
+                            <TableCell className="text-right print:hidden">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setSelectedSale(sale)
+                                  setPaymentAmount(String(Number(sale.reste_a_payer ?? 0)))
+                                  setError("")
+                                }}
+                              >
+                                <Wallet className="mr-2 h-4 w-4" />Encaisser
+                              </Button>
+                            </TableCell>
                           </TableRow>
                         )
                       })}
@@ -202,6 +252,45 @@ export default function AdminCreditsPage() {
           </Card>
         </>
       )}
+
+      <Dialog open={selectedSale !== null} onOpenChange={(open) => {
+        if (!open && !isPaying) {
+          setSelectedSale(null)
+          setPaymentAmount("")
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Encaisser la dette · {selectedSale?.code ?? ""}</DialogTitle>
+          </DialogHeader>
+          {selectedSale && (
+            <form onSubmit={submitPayment} className="space-y-4">
+              <div className="rounded-xl bg-muted/50 p-3 text-sm">
+                <p>Client : <strong>{customerName(selectedSale.client)}</strong></p>
+                <p>Solde restant : <strong>{displayMoney(selectedSale.reste_a_payer, selectedSale.deviseVente ?? selectedSale.devise_vente)}</strong></p>
+                <p className="mt-1 text-xs text-muted-foreground">Le paiement sera enregistré comme une entrée de caisse.</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="admin-credit-payment">Montant reçu</Label>
+                <Input
+                  id="admin-credit-payment"
+                  type="number"
+                  min="0.01"
+                  max={Number(selectedSale.reste_a_payer ?? 0)}
+                  step="0.01"
+                  required
+                  value={paymentAmount}
+                  onChange={(event) => setPaymentAmount(event.target.value)}
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" disabled={isPaying} onClick={() => setSelectedSale(null)}>Annuler</Button>
+                <Button type="submit" disabled={isPaying}>{isPaying ? "Enregistrement…" : "Enregistrer le paiement"}</Button>
+              </div>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

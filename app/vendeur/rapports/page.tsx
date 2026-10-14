@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import {
   ArrowLeft,
@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 type Currency = {
   id?: number
@@ -81,6 +82,7 @@ type ReportType = "ventes" | "produits" | "clients" | "credits" | "encaissements
 type ReportRow = {
   id: string
   cells: Array<string | number>
+  saleId?: number
 }
 
 type CurrencySummary = {
@@ -129,6 +131,9 @@ export default function SellerReportsPage() {
   const [search, setSearch] = useState("")
   const [reportType, setReportType] = useState<ReportType>("ventes")
   const [exportFormat, setExportFormat] = useState<"pdf" | "csv" | null>(null)
+  const [paymentSaleId, setPaymentSaleId] = useState<number | null>(null)
+  const [paymentAmount, setPaymentAmount] = useState("")
+  const [isPaying, setIsPaying] = useState(false)
 
   const fetchSales = useCallback(async () => {
     if (!user) return
@@ -151,6 +156,12 @@ export default function SellerReportsPage() {
   }, [authLoading, router, user])
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("type") === "credits") {
+      setReportType("credits")
+    }
+  }, [])
+
+  useEffect(() => {
     void fetchSales()
   }, [fetchSales])
 
@@ -159,6 +170,37 @@ export default function SellerReportsPage() {
     for (const sale of sales) byId.set(sale.id_client, clientName(sale.client))
     return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, "fr"))
   }, [sales])
+
+  const paymentSale = sales.find((sale) => sale.id === paymentSaleId)
+
+  const submitDebtPayment = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!paymentSale) return
+
+    const amount = Number(paymentAmount)
+    const remaining = Number(paymentSale.reste_a_payer ?? 0)
+    const currency = paymentSale.deviseVente ?? paymentSale.devise_vente ?? paymentSale.lignes?.[0]?.devise
+    if (!currency?.id || !Number.isFinite(amount) || amount <= 0 || amount - remaining > 0.000001) {
+      setError("Saisissez un montant valide, inférieur ou égal au solde restant.")
+      return
+    }
+
+    setIsPaying(true)
+    setError("")
+    try {
+      await backendRequest(`/ventes/${paymentSale.id}/paiements`, {
+        method: "POST",
+        body: JSON.stringify({ paiements: [{ devise_id: currency.id, montant: amount }] }),
+      })
+      setPaymentSaleId(null)
+      setPaymentAmount("")
+      await fetchSales()
+    } catch (paymentError) {
+      setError(paymentError instanceof Error ? paymentError.message : "Impossible d’enregistrer le paiement.")
+    } finally {
+      setIsPaying(false)
+    }
+  }
 
   const filteredSales = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("fr")
@@ -260,6 +302,7 @@ export default function SellerReportsPage() {
           const currency = sale.deviseVente ?? sale.devise_vente ?? sale.lignes?.[0]?.devise
           return {
             id: `credit-${sale.id}`,
+            saleId: sale.id,
             cells: [
               saleDate(sale),
               sale.code || `#${sale.id}`,
@@ -634,6 +677,7 @@ export default function SellerReportsPage() {
                     <TableHeader>
                       <TableRow>
                         {reportColumns[reportType].map((column) => <TableHead key={column}>{column}</TableHead>)}
+                        {reportType === "credits" && <TableHead className="text-right">Action</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -644,6 +688,23 @@ export default function SellerReportsPage() {
                               {cell}
                             </TableCell>
                           ))}
+                          {reportType === "credits" && (
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  const sale = sales.find((item) => item.id === row.saleId)
+                                  if (!sale) return
+                                  setPaymentSaleId(sale.id)
+                                  setPaymentAmount(String(Number(sale.reste_a_payer ?? 0)))
+                                  setError("")
+                                }}
+                              >
+                                <CreditCard className="mr-2 h-4 w-4" />Encaisser
+                              </Button>
+                            </TableCell>
+                          )}
                         </TableRow>
                       ))}
                     </TableBody>
@@ -661,6 +722,48 @@ export default function SellerReportsPage() {
           Les rapports de bénéfices sont réservés à l’administration, dans Rapports &gt; Finances.
         </p>
       </div>
+
+      <Dialog open={paymentSaleId !== null} onOpenChange={(open) => {
+        if (!open && !isPaying) {
+          setPaymentSaleId(null)
+          setPaymentAmount("")
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Encaisser une dette · {paymentSale?.code || (paymentSale ? `#${paymentSale.id}` : "")}</DialogTitle>
+          </DialogHeader>
+          {paymentSale && (
+            <form onSubmit={submitDebtPayment} className="space-y-4">
+              <div className="rounded-xl bg-muted/50 p-3 text-sm">
+                <p>Client : <strong>{clientName(paymentSale.client)}</strong></p>
+                <p>Solde restant : <strong>{formatMoney(
+                  paymentSale.reste_a_payer ?? 0,
+                  (paymentSale.deviseVente ?? paymentSale.devise_vente ?? paymentSale.lignes?.[0]?.devise)?.symbole || "",
+                )}</strong></p>
+                <p className="mt-1 text-xs text-muted-foreground">Le paiement sera enregistré comme une entrée de caisse.</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="seller-debt-payment">Montant reçu</Label>
+                <Input
+                  id="seller-debt-payment"
+                  type="number"
+                  min="0.01"
+                  max={Number(paymentSale.reste_a_payer ?? 0)}
+                  step="0.01"
+                  required
+                  value={paymentAmount}
+                  onChange={(event) => setPaymentAmount(event.target.value)}
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" disabled={isPaying} onClick={() => setPaymentSaleId(null)}>Annuler</Button>
+                <Button type="submit" disabled={isPaying}>{isPaying ? "Enregistrement…" : "Enregistrer le paiement"}</Button>
+              </div>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <style jsx global>{`
         @media print {
